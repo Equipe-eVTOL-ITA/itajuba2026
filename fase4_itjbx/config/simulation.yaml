@@ -1,0 +1,103 @@
+# Parametros da missao fase4_itjbx — perfil: simulation
+#
+# Estes valores sobrescrevem os padroes do codigo. Trocar de simulacao para
+# voo real deve ser trocar de arquivo aqui, nunca editar o .cpp.
+fase4_itjbx_node:
+  ros__parameters:
+    # Decolagem (NED: altura negativa e para cima)
+    takeoff_height: -2.5
+    max_vertical_velocity: 1.2
+    position_tolerance: 0.15
+
+    # Pouso
+    landing_velocity_max: 0.5
+    landing_velocity_min: 0.15
+    max_base_height: 0.5
+    landing_timeout: 5.0
+
+    # Busca da linha
+    max_horizontal_velocity: 0.3
+    search_timeout: 15.0
+    search_yaw_rate: 0.3      # rad/s, girando no lugar
+    search_sweep_angle: 0.6   # rad — nao gira mais que isso em torno do heading de decolagem
+
+    # Alinhamento com o vetor centro-do-circulo->linha (line_circle_exit_theta) antes de
+    # liberar FOLLOW_LINE — ver SearchLineState
+    align_kp: 0.9
+    align_ki: 0.0
+    align_kd: 0.1
+    align_tolerance_rad: 0.1745   # rad (~10°) — dentro disso, considera alinhado
+    max_align_yaw_rate: 0.8       # rad/s
+    # Suaviza exit_theta (EMA) antes do PID de alinhamento -- o circle_detector
+    # flicka mais que o lane_detector, e o termo derivativo do PidController e'
+    # cru (sem filtro), entao ruido vira tremor no yaw_rate. 1.0 desliga o filtro.
+    exit_theta_ema_alpha: 0.3
+
+    # Seguimento da linha
+    follow_timeout: 120.0
+    max_yaw_rate: 0.8               # rad/s
+    max_angle_for_translation: 0.6  # rad — acima disso, so gira (nao anda pra frente)
+    # Mesma ideia do exit_theta_ema_alpha acima, mas pro line_theta do lane_detector
+    # (que ja tem seu proprio EMA -- este aqui e' uma segunda camada, direto na
+    # entrada do PID angular, pra segurar o que sobra de tremor em curvas fechadas).
+    follow_theta_ema_alpha: 0.3
+    # Quanto tempo (s) depois de entrar em FOLLOW_LINE antes de avisar o
+    # circle_detector que pode se desligar. Zero = desliga na hora (era o
+    # comportamento antigo). O circle_detector morre no instante em que recebe
+    # o aviso, mas o lane_detector continua usando a ULTIMA posicao da base
+    # publicada por ele pra recortar a propria mascara -- se o aviso fosse
+    # imediato, esse recorte ficava congelado bem no momento em que o drone
+    # comeca a se mover de verdade, desalinhando da base real e sujando
+    # theta/x_centroid (era o tremor logo ao entrar em FOLLOW_LINE). Com o
+    # atraso, o circle_detector continua publicando posicao fresca durante essa
+    # janela critica.
+    circle_shutdown_delay_s: 2.0
+
+    # PID lateral: corrige vy a partir de line_x_centroid (erro em pixels)
+    pid_lateral_kp: 0.0025
+    pid_lateral_ki: 0.0
+    pid_lateral_kd: 0.001
+
+    # PID angular: corrige yaw_rate a partir de line_theta (erro em radianos)
+    pid_angular_kp: 0.9
+    pid_angular_ki: 0.0
+    pid_angular_kd: 0.15
+
+    # Circle detector (topico /base_circle) — quanto tempo confiar na ultima deteccao
+    base_circle_max_age_s: 1.0
+
+    # Aproximacao ate ficar em cima da mangueira vermelha, antes de girar (ver
+    # ApproachRedLineState) -- entra assim que o red_line_detector
+    # (/red_line_detection) avista ela durante FOLLOW_LINE. So vx (frente/tras)
+    # ativo aqui, vy=0 e yaw_rate=0 -- nao gira nem desliza de lado, so avanca/recua.
+    approach_red_timeout: 20.0             # s — estoura -> pousa em vez de ficar preso
+    approach_red_tolerance_px: 15.0        # px
+    max_approach_red_forward_velocity: 0.3 # m/s
+    # PID: corrige vx a partir de red_line_y_centroid (reta cruzando pelo centro
+    # vertical do quadro = drone em cima da mangueira)
+    approach_red_forward_kp: 0.0025
+    approach_red_forward_ki: 0.0
+    approach_red_forward_kd: 0.001
+
+    # Alinhamento (giro) com a mangueira vermelha, depois de ja estar em cima
+    # dela (ver AlignRedLineState). SEM PID e SO UMA medicao: mede
+    # align_red_theta_samples leituras de red_line_theta, tira a mediana,
+    # calcula o yaw alvo UMA vez e manda o drone girar suavemente ate la via
+    # setLocalPosition (geometria conhecida -- a camera e' rigida ao corpo --
+    # nao controle realimentado). Nao ha' mais rodadas de medir->girar->
+    # remedir: isso causava trancos, cada rodada extra era outro comando de
+    # yaw empilhado antes do anterior assentar. Depois do comando, NENHUMA
+    # leitura de visao acontece mais -- so' o proprio yaw do drone (dado de
+    # voo) e' checado pra saber quando chegou.
+    align_red_timeout: 20.0            # s — estoura -> volta pra base em vez de ficar preso
+    align_red_tolerance_rad: 0.0873    # rad (~5°) — se a mediana ja vier dentro, nem gira
+    align_red_theta_samples: 20.0      # leituras cruas pra' mediana
+    align_red_yaw_reach_tolerance_rad: 0.035  # rad (~2°) — criterio de "chegou", medido no proprio drone
+    # Fica DENTRO dessa tolerancia, parado, por esse tempo seguido antes de
+    # aceitar -- da tempo do overshoot/inercia do PX4 amortecer.
+    align_red_rotate_settle_s: 0.8     # s
+
+# O system_health do drone_lib tambem le deste arquivo.
+system_health:
+  ros__parameters:
+    publish_rate: 1.0

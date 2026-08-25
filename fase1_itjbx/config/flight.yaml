@@ -1,0 +1,68 @@
+# Parametros da missao fase1_itjbx — perfil: flight
+#
+# Estes valores sobrescrevem os padroes do codigo. Trocar de simulacao para
+# voo real deve ser trocar de arquivo aqui, nunca editar o .cpp.
+fase1_itjbx_node:
+  ros__parameters:
+    # Decolagem (NED: altura negativa e para cima)
+    takeoff_height: -2.5
+    max_vertical_velocity: 1.2
+    position_tolerance: 0.15
+
+    # Pouso
+    landing_velocity_max: 0.5
+    landing_velocity_min: 0.15
+    max_base_height: 0.5
+    landing_timeout: 5.0
+
+    # Movimento horizontal
+    max_horizontal_velocity: 1.5
+
+    # Retangular Search
+    abs_x: 6.0
+    abs_y: 6.0
+    diagonal_step: 1.5
+    total_bases: 5.0
+
+    # ── Projecao pixel -> mundo (base_detector_itjbx2026) ────────────────
+    # Em voo real, calibre a camera de verdade (camera_calibrator) e informe
+    # camera_fx/fy/cx/cy -- o FOV do fabricante e so uma aproximacao grosseira
+    # do sensor real, ao contrario da simulacao onde o SDF da o valor exato.
+    camera_fx: 0.0
+    camera_fy: 0.0
+    camera_cx: 0.0
+    camera_cy: 0.0
+    camera_hfov: 1.047
+    camera_width: 640
+    camera_height: 480
+    published_size: 0
+
+    # Extrinsecos: pose da camera no corpo do drone (FRD). yaw = pi/2 e a
+    # montagem em que o topo da imagem aponta para a frente do drone. Meca
+    # tx/ty/tz de verdade na montagem fisica antes de voar.
+    camera_roll: 0.0
+    camera_pitch: 0.0
+    camera_yaw: 1.5707963267948966  # pi/2
+    camera_tx: 0.0
+    camera_ty: 0.0
+    camera_tz: 0.0
+
+    # Altura do plano das bases, em mundo FRD (positivo = abaixo da
+    # origem). 0.0 supoe que estao no mesmo nivel do chao de decolagem.
+    base_plane_z: 0.0
+
+    # Duas deteccoes a menos que isto (so XY) contam como a mesma base.
+    # 0.75: medido em teste (simulacao), duas deteccoes da MESMA base
+    # projetaram a ~0.50 m uma da outra -- bem na borda do valor antigo
+    # (0.5). Reavalie em voo real, onde o ruido pode ser diferente.
+    base_dedup_radius: 0.75
+
+    # Fracao da imagem tratada como "borda" -- deteccoes com centro fora de
+    # [margem, 1-margem] em X ou Y sao descartadas antes de projetar. Ver o
+    # comentario em simulation.yaml.
+    border_margin_frac: 0.08
+
+# O system_health do drone_lib tambem le deste arquivo.
+system_health:
+  ros__parameters:
+    publish_rate: 1.0

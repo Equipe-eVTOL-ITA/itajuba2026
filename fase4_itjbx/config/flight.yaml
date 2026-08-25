@@ -1,0 +1,81 @@
+# Parametros da missao fase4_itjbx — perfil: flight
+#
+# Estes valores sobrescrevem os padroes do codigo. Trocar de simulacao para
+# voo real deve ser trocar de arquivo aqui, nunca editar o .cpp.
+#
+# Ainda nao calibrado em voo real -- copia dos valores de simulacao. Ajuste
+# principalmente os HSV do lane_detector/circle_detector (luz externa e bem
+# diferente da do Gazebo) e as constantes de PID abaixo.
+fase4_itjbx_node:
+  ros__parameters:
+    # Decolagem (NED: altura negativa e para cima)
+    takeoff_height: -2.0
+    max_vertical_velocity: 1.2
+    position_tolerance: 0.15
+
+    # Pouso
+    landing_velocity_max: 0.5
+    landing_velocity_min: 0.15
+    max_base_height: 0.5
+    landing_timeout: 5.0
+
+    # Busca da linha
+    max_horizontal_velocity: 0.3
+    search_timeout: 15.0
+    search_yaw_rate: 0.3
+    search_sweep_angle: 0.6
+
+    # Alinhamento com o vetor centro-do-circulo->linha antes de liberar FOLLOW_LINE
+    align_kp: 0.9
+    align_ki: 0.0
+    align_kd: 0.1
+    align_tolerance_rad: 0.1745
+    max_align_yaw_rate: 0.8
+    # Suaviza exit_theta (EMA) antes do PID de alinhamento -- ver comentario em
+    # search_line_state.hpp. Em voo real a deteccao costuma ser mais ruidosa
+    # que em sim; se ainda tremer, desca este valor (0.3 -> 0.2, por exemplo).
+    exit_theta_ema_alpha: 0.3
+
+    # Seguimento da linha
+    follow_timeout: 120.0
+    max_yaw_rate: 0.8
+    max_angle_for_translation: 0.6
+    follow_theta_ema_alpha: 0.3
+    # Atraso (s) antes de avisar o circle_detector que pode se desligar -- ver
+    # comentario em follow_line_state.hpp / simulation.yaml.
+    circle_shutdown_delay_s: 2.0
+
+    # PID lateral: corrige vy a partir de line_x_centroid (erro em pixels)
+    pid_lateral_kp: 0.0025
+    pid_lateral_ki: 0.0
+    pid_lateral_kd: 0.001
+
+    # PID angular: corrige yaw_rate a partir de line_theta (erro em radianos)
+    pid_angular_kp: 0.9
+    pid_angular_ki: 0.0
+    pid_angular_kd: 0.15
+
+    # Circle detector (topico /base_circle) — quanto tempo confiar na ultima deteccao
+    base_circle_max_age_s: 1.0
+
+    # Aproximacao ate ficar em cima da mangueira vermelha -- ver comentario em simulation.yaml
+    approach_red_timeout: 20.0
+    approach_red_tolerance_px: 15.0
+    max_approach_red_forward_velocity: 0.3
+    approach_red_forward_kp: 0.0025
+    approach_red_forward_ki: 0.0
+    approach_red_forward_kd: 0.001
+
+    # Alinhamento (giro) com a mangueira vermelha -- SEM PID e SO UMA medicao,
+    # ver comentario em simulation.yaml (mede 20x -> mediana -> UM
+    # setLocalPosition -- sem mais leitura de visao depois disso).
+    align_red_timeout: 20.0
+    align_red_tolerance_rad: 0.0873
+    align_red_theta_samples: 20.0
+    align_red_yaw_reach_tolerance_rad: 0.035
+    align_red_rotate_settle_s: 0.8
+
+# O system_health do drone_lib tambem le deste arquivo.
+system_health:
+  ros__parameters:
+    publish_rate: 1.0

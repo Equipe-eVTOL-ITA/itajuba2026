@@ -1,0 +1,11 @@
+# Artefatos do colcon. Rodar `colcon build` de dentro de um pacote cria estes
+# diretorios AO LADO do codigo, e um `git add -A` distraido os commita junto --
+# foi o que aconteceu no primeiro commit de outro repositorio da equipe, que
+# trouxe 50+ arquivos e binarios (a.out, .bin) para dentro do historico.
+build/
+install/
+log/
+
+# Artefatos de Python
+__pycache__/
+*.pyc

@@ -1,0 +1,24 @@
+# Parametros da missao fase3_itjbx — perfil: simulation
+#
+# Estes valores sobrescrevem os padroes do codigo. Trocar de simulacao para
+# voo real deve ser trocar de arquivo aqui, nunca editar o .cpp.
+fase3_itjbx_node:
+  ros__parameters:
+    # Decolagem (NED: altura negativa e para cima)
+    takeoff_height: -2.5
+    max_vertical_velocity: 1.2
+    position_tolerance: 0.15
+
+    # Pouso
+    landing_velocity_max: 0.5
+    landing_velocity_min: 0.15
+    max_base_height: 0.5
+    landing_timeout: 5.0
+
+    # Movimento horizontal
+    max_horizontal_velocity: 1.5
+
+# O system_health do drone_lib tambem le deste arquivo.
+system_health:
+  ros__parameters:
+    publish_rate: 1.0
