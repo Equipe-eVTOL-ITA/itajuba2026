@@ -43,15 +43,14 @@ def generate_launch_description():
         parameters=[params], output='screen')
 
     # Em voo a imagem vem do camera_publisher, e nao de uma ponte do Gazebo
-    # (mesmo padrao do cbr2026/fase1 -- veja o comentario la). Escolha o
-    # executable certo pra camera fisica usada (webcam, raspicam, imx_219,
-    # oak_d -- ver src/camera_publisher) e o topico que os detectores esperam
-    # (image_topic: /vertical_camera/compressed em lane_detector.yaml e
-    # circle_detector.yaml) precisa bater com o que o camera_publisher publica.
-    #
-    # camera = Node(
-    #     package='camera_publisher', executable='webcam',
-    #     parameters=[{'topic': '/vertical_camera'}], output='screen')
+    # (mesmo padrao do cbr2026/fase1 -- veja o comentario la). O topico
+    # (webcam_publisher: camera_name 'vertical' -> /vertical_camera/compressed,
+    # ver flight.yaml) e' o mesmo que os tres detectores ja esperam
+    # (image_topic em lane_detector.yaml, circle_detector.yaml e
+    # red_line_detector.yaml), entao nenhum deles muda entre sim e voo.
+    camera = Node(
+        package='camera_publisher', executable='webcam',
+        parameters=[params], output='screen')
 
     lane_detector = Node(
         package='lane_detector', executable='lane_detector_node',
@@ -75,7 +74,7 @@ def generate_launch_description():
                               description='Abrir o RViz2'),
         bag,
         system_health,
-        # camera,
+        camera,
         lane_detector,
         circle_detector,
         red_line_detector,

@@ -62,6 +62,30 @@ fase1_itjbx_node:
     # comentario em simulation.yaml.
     border_margin_frac: 0.08
 
+# ===========================================================================
+# Camera
+# ===========================================================================
+#
+# O launch sobe o no sem `name=`, entao o nome e o padrao do executavel. Sem
+# uma secao com esse nome exato, o no cai nos defaults do codigo.
+webcam_publisher:
+  ros__parameters:
+    # O papel, e nao o modelo: forma o topico /vertical_camera/compressed,
+    # o mesmo que o base_detector_itjbx2026.yaml assina.
+    camera_name: 'vertical'
+
+    # Recorte central + resize. Os intrinsecos acima (camera_fx/fy/cx/cy,
+    # camera_width/height) descrevem ESTA imagem -- calibre com camera_calibrator
+    # nesta mesma resolucao.
+    frame_width: 640
+    frame_height: 480
+
+    # 10 Hz: o base_detector_itjbx2026 roda a 10 Hz (processing_frequency),
+    # publicar mais rapido so gasta banda.
+    publish_rate: 10.0
+
+    jpeg_quality: 70
+
 # O system_health do drone_lib tambem le deste arquivo.
 system_health:
   ros__parameters:

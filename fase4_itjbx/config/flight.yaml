@@ -75,6 +75,27 @@ fase4_itjbx_node:
     align_red_yaw_reach_tolerance_rad: 0.035
     align_red_rotate_settle_s: 0.8
 
+# ===========================================================================
+# Camera
+# ===========================================================================
+#
+# O launch sobe o no sem `name=`, entao o nome e o padrao do executavel. Sem
+# uma secao com esse nome exato, o no cai nos defaults do codigo.
+webcam_publisher:
+  ros__parameters:
+    # O papel, e nao o modelo: forma o topico /vertical_camera/compressed, o
+    # mesmo que lane_detector.yaml, circle_detector.yaml e
+    # red_line_detector.yaml assinam (image_topic).
+    camera_name: 'vertical'
+
+    # 800x800: mesma resolucao que o image_bridge entrega em simulacao (SDF
+    # da vertical_camera), e o que resize_width dos tres detectores pressupoe.
+    frame_width: 800
+    frame_height: 800
+
+    publish_rate: 10.0
+    jpeg_quality: 70
+
 # O system_health do drone_lib tambem le deste arquivo.
 system_health:
   ros__parameters:
