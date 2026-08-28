@@ -7,11 +7,15 @@ import os
 from ament_index_python.packages import get_package_share_directory
 from launch import LaunchDescription
 from launch.actions import DeclareLaunchArgument, ExecuteProcess, TimerAction
+from launch.conditions import IfCondition
+from launch.substitutions import LaunchConfiguration
 from launch_ros.actions import Node
 
 
 def generate_launch_description():
-    params = os.path.join(get_package_share_directory('fase4_itjbx'), 'config', 'flight.yaml')
+    pkg_dir = get_package_share_directory('fase4_itjbx')
+    params = os.path.join(pkg_dir, 'config', 'flight.yaml')
+    rviz_config = os.path.join(pkg_dir, 'rviz', 'trajectory.rviz')
 
     lane_pkg_dir = get_package_share_directory('lane_detector')
     lane_params = os.path.join(lane_pkg_dir, 'config', 'lane_detector.yaml')
@@ -69,6 +73,14 @@ def generate_launch_description():
         package='fase4_itjbx', executable='fase4_itjbx',
         parameters=[params], output='screen')
 
+    # Mesmo padrao do simulation.launch.py -- o argumento 'rviz' so' existia
+    # de nome aqui antes (declarado, nunca usado).
+    rviz = Node(
+        package='rviz2', executable='rviz2',
+        arguments=['-d', rviz_config],
+        condition=IfCondition(LaunchConfiguration('rviz')),
+        output='screen')
+
     return LaunchDescription([
         DeclareLaunchArgument('rviz', default_value='false',
                               description='Abrir o RViz2'),
@@ -78,6 +90,7 @@ def generate_launch_description():
         lane_detector,
         circle_detector,
         red_line_detector,
+        rviz,
         # A FSM espera 5 s para os nos de visao subirem antes de comecar.
         TimerAction(period=5.0, actions=[mission]),
     ])
