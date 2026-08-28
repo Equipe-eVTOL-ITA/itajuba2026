@@ -28,7 +28,7 @@ def generate_launch_description():
     # simulation.yaml da missao (que e' keyed em fase2_itjbx_node:) e usaria
     # os defaults do codigo em silencio.
     vision_pkg_dir = get_package_share_directory('base_detector_itjbx2026')
-    vision_params = os.path.join(vision_pkg_dir, 'config', 'base_detector_itjbx2026.yaml')
+    vision_params = os.path.join(vision_pkg_dir, 'config', 'simulation.yaml')
 
     stamp = datetime.datetime.now().strftime('%Y%m%d_%H%M%S')
     bag_dir = os.path.expanduser(f'~/evtol/mission_logs/fase2_itjbx_{stamp}')

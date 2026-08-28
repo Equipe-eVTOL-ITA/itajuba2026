@@ -71,7 +71,7 @@ fase1_itjbx_node:
 webcam_publisher:
   ros__parameters:
     # O papel, e nao o modelo: forma o topico /vertical_camera/compressed,
-    # o mesmo que o base_detector_itjbx2026.yaml assina.
+    # o mesmo que base_detector_itjbx2026/config/flight.yaml assina.
     camera_name: 'vertical'
 
     # Recorte central + resize. Os intrinsecos acima (camera_fx/fy/cx/cy,
