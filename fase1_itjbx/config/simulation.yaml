@@ -24,6 +24,13 @@ fase1_itjbx_node:
     diagonal_step: 0.8
     total_bases: 5.0
 
+    # Suavizacao das curvas de 90 graus: a partir de corner_decel_radius
+    # metros do vertice, a velocidade cai linearmente ate corner_min_velocity
+    # -- sem isso o drone chegava em cada esquina do retangulo na velocidade
+    # maxima e virava seco.
+    corner_decel_radius: 1.0
+    corner_min_velocity: 0.3
+
     # ── Projecao pixel -> mundo (base_detector_itjbx2026) ────────────────
     # camera_fx = 0.0 usa camera_hfov + camera_width/height para derivar os
     # intrinsecos (o que o SDF do Gazebo da); informe camera_fx/fy/cx/cy so

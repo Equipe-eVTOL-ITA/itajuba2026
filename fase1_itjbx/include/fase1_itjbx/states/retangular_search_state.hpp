@@ -31,6 +31,11 @@ public:
         if (!stdstates::require(blackboard, drone_, "position_tolerance", position_tolerance_)) return;
         if (!stdstates::require(blackboard, drone_, "max_horizontal_velocity", max_horizontal_velocity_)) return;
 
+        // Suavizacao das curvas de 90 graus nos vertices do retangulo -- ver
+        // rampa de velocidade em act().
+        if (!stdstates::require(blackboard, drone_, "corner_decel_radius", corner_decel_radius_)) return;
+        if (!stdstates::require(blackboard, drone_, "corner_min_velocity", corner_min_velocity_)) return;
+
         // Blackboard so' tem float; converte pra int uma vez aqui.
         float total_bases_f = 0.0f;
         if (!stdstates::require(blackboard, drone_, "total_bases", total_bases_f)) return;
@@ -91,9 +96,23 @@ public:
 
         }
 
+        // Rampa de velocidade: dentro de corner_decel_radius_ do vertice atual
+        // (goal_), a velocidade cai linearmente de max_horizontal_velocity_ ate
+        // corner_min_velocity_ -- sem isso o drone chegava em cada curva de 90
+        // graus na velocidade maxima e virava seco. Fora do raio de frenagem,
+        // velocidade_alvo fica em max_horizontal_velocity_ (comportamento
+        // antigo, sem rampa).
+        const double dist_to_goal = diff.norm();
+        float velocidade_alvo = max_horizontal_velocity_;
+        if (corner_decel_radius_ > 0.0f && dist_to_goal < corner_decel_radius_) {
+            const float fracao = static_cast<float>(dist_to_goal) / corner_decel_radius_;
+            velocidade_alvo = corner_min_velocity_ +
+                (max_horizontal_velocity_ - corner_min_velocity_) * fracao;
+        }
+
         // Move toward goal with velocity clamping
-        Eigen::Vector3d little_goal = pos_ + (diff.norm() > max_horizontal_velocity_
-                                            ? diff.normalized() * max_horizontal_velocity_
+        Eigen::Vector3d little_goal = pos_ + (dist_to_goal > velocidade_alvo
+                                            ? diff.normalized() * velocidade_alvo
                                             : diff);
 
         drone_->setLocalPosition(
@@ -110,6 +129,7 @@ private:
     bool ok_{false};
     float vx_{0.0f}, vy_{0.0f}, step_{0.0f};
     float position_tolerance_{0.0f}, max_horizontal_velocity_{0.0f};
+    float corner_decel_radius_{0.0f}, corner_min_velocity_{0.0f};
     float seno_{0.0f}, cosseno_{0.0f};
     int contador_{0}, laps_{0};
     Eigen::Vector3d initial_pos_{0.0, 0.0, 0.0}, pos_{0.0, 0.0, 0.0}, goal_{0.0, 0.0, 0.0};

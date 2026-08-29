@@ -145,7 +145,13 @@ public:
             {"abs_x", 6.0},
             {"abs_y", 6.0},
             {"diagonal_step", 1.5},
-            {"total_bases", 5.0}
+            {"total_bases", 5.0},
+
+            // Suavizacao das curvas de 90 graus (ver rampa de velocidade em
+            // RetangularSearchState::act()): dentro deste raio do vertice a
+            // velocidade cai ate corner_min_velocity.
+            {"corner_decel_radius", 1.0},
+            {"corner_min_velocity", 0.3}
             // ACRESCENTE aqui os parametros desta missao, e replique-os nos
             // dois YAML de config/.
         };
