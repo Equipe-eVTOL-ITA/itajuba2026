@@ -21,11 +21,7 @@ find_package(custom_msgs REQUIRED)
 find_package(nav_msgs REQUIRED)
 find_package(geometry_msgs REQUIRED)
 find_package(std_msgs REQUIRED)
-find_package(sensor_msgs REQUIRED)
 find_package(visualization_msgs REQUIRED)
-
-find_package(vision_geometry REQUIRED)
-find_package(OpenCV REQUIRED)
 
 include_directories(include)
 include_directories(${EIGEN3_INCLUDE_DIR})
@@ -43,11 +39,7 @@ ament_target_dependencies(fase2_itjbx
   nav_msgs
   geometry_msgs
   std_msgs
-  sensor_msgs
   visualization_msgs
-
-  vision_geometry
-  OpenCV
 )
 
 install(TARGETS fase2_itjbx DESTINATION lib/${PROJECT_NAME})

@@ -6,7 +6,7 @@ import os
 
 from ament_index_python.packages import get_package_share_directory
 from launch import LaunchDescription
-from launch.actions import DeclareLaunchArgument, ExecuteProcess, TimerAction
+from launch.actions import ExecuteProcess, TimerAction
 from launch_ros.actions import Node
 
 
@@ -23,6 +23,8 @@ def generate_launch_description():
              '/rosout',
              '/drone_trajectory',
              '/telemetry/drone_status',
+             '/bouncing_detection',
+             '/discovered_bases',
              '/fmu/out/vehicle_local_position',
              '/fmu/out/vehicle_status',
              '/fmu/in/trajectory_setpoint'],
@@ -32,18 +34,35 @@ def generate_launch_description():
         package='drone_lib', executable='system_health',
         parameters=[params], output='screen')
 
+    # Em voo a imagem vem do camera_publisher, e nao de uma ponte do Gazebo
+    # (mesmo padrao do fase1_itjbx/fase4_itjbx -- veja o comentario la). O
+    # topico (webcam_publisher: camera_name 'vertical' ->
+    # /vertical_camera/compressed, ver flight.yaml) e' o mesmo nome que o
+    # image_bridge da simulacao entrega -- por isso o CODIGO de deteccao
+    # (RDPformas) nao muda entre os dois. SEM este no, RDPformas sobe, nao
+    # reclama de nada e simplesmente nunca recebe quadro (ver o mesmo aviso
+    # em simulation.launch.py sobre a ponte do Gazebo).
+    camera = Node(
+        package='camera_publisher', executable='webcam',
+        parameters=[params], output='screen')
+
+    # No de visao: mesmo detector que sae2026/mission_1 usa (ver a conversa
+    # que motivou o port desta missao) -- publica ArUco + forma + bases
+    # numeradas em "bouncing_detection", sem parametros proprios a passar.
+    vision = Node(
+        package='RDPformas', executable='RDPformas', output='screen')
+
     mission = Node(
         package='fase2_itjbx', executable='fase2_itjbx',
         parameters=[params], output='screen')
 
-    # ACRESCENTE aqui os nos de visao desta missao, ex.:
-    # vision = Node(package='cv_nodes_algum', executable='detector', output='screen')
-
     return LaunchDescription([
-        DeclareLaunchArgument('rviz', default_value='false',
-                              description='Abrir o RViz2'),
         bag,
+        camera,
         system_health,
-        # A FSM espera 5 s para os outros nos subirem antes de comecar.
+        vision,
+        # A FSM espera 5 s para os outros nos subirem antes de comecar. Sem
+        # isso ela decola antes de o detector estar pronto e varre o primeiro
+        # trecho da grade cega.
         TimerAction(period=5.0, actions=[mission]),
     ])

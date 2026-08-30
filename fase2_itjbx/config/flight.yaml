@@ -2,6 +2,11 @@
 #
 # Estes valores sobrescrevem os padroes do codigo. Trocar de simulacao para
 # voo real deve ser trocar de arquivo aqui, nunca editar o .cpp.
+#
+# Portado de sae2026/mission_1 (ver fase2_itjbx.cpp): o no assina o mesmo
+# detector de visao (RDPformas, topico "bouncing_detection") e nao faz
+# projecao pixel->mundo propria -- por isso nao ha bloco de calibracao de
+# camera aqui, ao contrario de fase1_itjbx.
 fase2_itjbx_node:
   ros__parameters:
     # Decolagem (NED: altura negativa e para cima)
@@ -18,49 +23,74 @@ fase2_itjbx_node:
     # Movimento horizontal
     max_horizontal_velocity: 1.5
 
-    # Retangular Search
-    abs_x: 6.0
-    abs_y: 6.0
-    diagonal_step: 1.5
-    total_bases: 5.0
+    # Busca do ArUco / identificacao da forma
+    z_max_search: -2.5
+    search_aruco_velocity: 0.4
+    aruco_persistence_frames: 3.0
+    aruco_tolerance: 0.15
+    aruco_kp_x: 0.6
+    aruco_kp_y: 0.6
+    aruco_kd_x: 0.05
+    aruco_kd_y: 0.05
+    aruco_align_frames: 5.0
+    shape_id_altitude: -1.0
+    shape_id_velocity: 0.3
 
-    # ── Projecao pixel -> mundo (base_detector_itjbx2026) ────────────────
-    # Em voo real, calibre a camera de verdade (camera_calibrator) e informe
-    # camera_fx/fy/cx/cy -- o FOV do fabricante e so uma aproximacao grosseira
-    # do sensor real, ao contrario da simulacao onde o SDF da o valor exato.
-    camera_fx: 0.0
-    camera_fy: 0.0
-    camera_cx: 0.0
-    camera_cy: 0.0
-    camera_hfov: 1.047
-    camera_width: 640
-    camera_height: 480
-    published_size: 0
+    # Busca/aproximacao da base numerada alvo
+    base_tolerance: 0.10
+    base_kp_x: 0.5
+    base_kp_y: 0.5
+    base_kd_x: 0.03
+    base_kd_y: 0.03
+    base_persistence_frames: 3.0
+    base_cam_scale: 0.7
+    base_max_err_radius: 0.7
+    base_dedup_radius: 1.5
+    aruco_exclusion_radius: 0.5
 
-    # Extrinsecos: pose da camera no corpo do drone (FRD). yaw = pi/2 e a
-    # montagem em que o topo da imagem aponta para a frente do drone. Meca
-    # tx/ty/tz de verdade na montagem fisica antes de voar.
-    camera_roll: 0.0
-    camera_pitch: 0.0
-    camera_yaw: 1.5707963267948966  # pi/2
-    camera_tx: 0.0
-    camera_ty: 0.0
-    camera_tz: 0.0
+    # Varredura retangular (RetangularSearchState, fase1_itjbx) -- usada por
+    # SEARCH_ARUCO (campo inteiro, a partir de casa) e SEARCH_BASE (padrao
+    # apertado, local, em torno de uma posicao em cache).
+    aruco_search_abs_x: 6.0
+    aruco_search_abs_y: 6.0
+    aruco_search_step: 1.0
+    base_search_abs_x: 3.0
+    base_search_abs_y: 3.0
+    base_search_step: 0.5
+    corner_decel_radius: 1.0
+    corner_min_velocity: 0.3
 
-    # Altura do plano das bases, em mundo FRD (positivo = abaixo da
-    # origem). 0.0 supoe que estao no mesmo nivel do chao de decolagem.
-    base_plane_z: 0.0
+# ===========================================================================
+# Camera
+# ===========================================================================
+#
+# O launch sobe o no sem `name=`, entao o nome e o padrao do executavel. Sem
+# uma secao com esse nome exato, o no cai nos defaults do codigo (que, no
+# caso do webcam_publisher, ja sao 800x800 -- mesma resolucao do
+# vertical_camera simulado, entao a geometria calibrada em simulation.yaml
+# (shape_id_altitude, aruco_tolerance) parte do mesmo tamanho de quadro. O
+# HFOV da lente REAL, porem, e' desconhecido -- reavalie shape_id_altitude/
+# aruco_tolerance em voo, a calibracao da simulacao presume 60 graus (ver
+# vertical_camera/model.sdf) que so vale pra camera simulada.
+webcam_publisher:
+  ros__parameters:
+    # O papel, e nao o modelo: forma o topico /vertical_camera/compressed,
+    # o mesmo que RDPformas (image_topic, ver config/rdpformas.yaml) assina.
+    camera_name: 'vertical'
 
-    # Duas deteccoes a menos que isto (so XY) contam como a mesma base.
-    # 0.75: medido em teste (simulacao), duas deteccoes da MESMA base
-    # projetaram a ~0.50 m uma da outra -- bem na borda do valor antigo
-    # (0.5). Reavalie em voo real, onde o ruido pode ser diferente.
-    base_dedup_radius: 0.75
+    frame_width: 800
+    frame_height: 800
 
-    # Fracao da imagem tratada como "borda" -- deteccoes com centro fora de
-    # [margem, 1-margem] em X ou Y sao descartadas antes de projetar. Ver o
-    # comentario em simulation.yaml.
-    border_margin_frac: 0.08
+    # 10 Hz: RDPformas roda a 10 Hz (processing_frequency). Publicar mais
+    # rapido so gasta banda.
+    publish_rate: 10.0
+
+    jpeg_quality: 70
+
+    # TODO antes do primeiro voo: confirme o device (/dev/videoN pode nao
+    # ser 0 dependendo da ordem de enumeracao USB na Raspberry Pi) --
+    # ver video_source em camera_publisher/webcam_publisher.py.
+    video_source: '/dev/video0'
 
 # O system_health do drone_lib tambem le deste arquivo.
 system_health:

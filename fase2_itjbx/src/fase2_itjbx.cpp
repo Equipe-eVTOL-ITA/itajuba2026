@@ -1,67 +1,72 @@
-#include <chrono>
-#include <cstdio>
-#include <ctime>
-#include <filesystem>
-#include <fstream>
+#include <cmath>
 #include <map>
 #include <memory>
+#include <set>
 #include <string>
 #include <variant>
-#include <vector>
-
-#include <Eigen/Eigen>
 
 #include <rclcpp/rclcpp.hpp>
 #include "fsm/fsm.hpp"
 #include "drone/Drone.hpp"
+#include "custom_msgs/msg/bouncing_detection.hpp"
+#include "custom_msgs/msg/read_base_number_result.hpp"
 #include "nav_msgs/msg/path.hpp"
 #include "geometry_msgs/msg/pose_stamped.hpp"
-#include "custom_msgs/msg/multi_base_detection.hpp"
-#include "sensor_msgs/msg/compressed_image.hpp"
-#include "vision_geometry/ground_projector.hpp"
+#include "std_msgs/msg/string.hpp"
+#include "std_msgs/msg/empty.hpp"
 #include "visualization_msgs/msg/marker_array.hpp"
+#include "visualization_msgs/msg/marker.hpp"
 
 // Estados padrao, do stdstates -- servem a qualquer missao.
 #include "stdstates/arming_state.hpp"
 #include "stdstates/takeoff_state.hpp"
 #include "stdstates/landing_state.hpp"
-#include "stdstates/return_home_state.hpp"
 
-// Estados desta missao. Crie em include/fase2_itjbx/states/ e inclua aqui.
-#include "fase2_itjbx/states/retangular_search_state.hpp"
+// Estados desta missao -- portados de sae2026/mission_1, que resolve
+// essencialmente o mesmo problema (achar um ArUco, identificar a forma ao
+// redor dele, procurar a base numerada correspondente e pousar nela). A
+// unica mudanca de logica em relacao ao original e' o padrao de varredura:
+// SearchArucoState/SearchBaseState usam a varredura retangular de
+// itajuba_2026/fase1_itjbx (RetangularSearchState) em vez do spiral quadrado
+// que a mission_1 usava -- ver a conversa que motivou esta migracao.
+//
+// CONFIRM_NUMBER/RETURN_TO_SEARCH sao NOVOS em relacao a mission_1: a
+// Raspberry Pi nao aguenta rodar EasyOCR a cada frame, entao RDPformas.py
+// agora so' detecta FORMA continuamente (leve) e a leitura de digito vira
+// um pedido pontual (1 foto), disparado so' depois que o drone ja alinhou
+// com uma base do mesmo formato do ArUco -- ver a conversa que motivou essa
+// mudanca.
+#include "fase2_itjbx/states/initial_aruco_search_state.hpp"
+#include "fase2_itjbx/states/search_aruco_state.hpp"
+#include "fase2_itjbx/states/go_to_aruco_state.hpp"
+#include "fase2_itjbx/states/search_base_state.hpp"
+#include "fase2_itjbx/states/go_to_base_state.hpp"
+#include "fase2_itjbx/states/descend_for_shape_state.hpp"
+#include "fase2_itjbx/states/confirm_number_state.hpp"
+#include "fase2_itjbx/states/return_to_search_state.hpp"
 
 /**
  * @brief Maquina de estados da missao fase2_itjbx.
  *
- * Ja vem com o ciclo minimo que toda missao tem: armar, decolar, pousar.
- * Para estender, veja os blocos marcados com ACRESCENTE.
+ * Portada de sae2026/mission_1::Mission1FSM. Fluxo: sobe procurando o ArUco
+ * (INITIAL_ARUCO_SEARCH); se nao achar so subindo, varre o campo em
+ * retangulo (SEARCH_ARUCO); alinha sobre o ArUco (GO_TO_ARUCO); se a forma
+ * ao redor nao for identificavel na altitude de busca, desce pra
+ * identificar (DESCEND_FOR_SHAPE); com o alvo calculado, procura a base
+ * numerada certa (SEARCH_BASE) e pousa nela (GO_TO_BASE -> LANDING).
  */
 class Fase2ItjbxFSM : public fsm::FSM {
 public:
     Fase2ItjbxFSM(
         std::shared_ptr<Drone> drone,
-        const std::map<std::string, std::variant<double, std::string>> &params
+        const std::map<std::string, std::variant<double, std::string>>& params
     ) : fsm::FSM({"ERROR", "FINISHED"}) {
 
         // O drone fica na blackboard: todo estado o acessa por aqui.
         this->blackboard_set<std::shared_ptr<Drone>>("drone", drone);
 
-        // "bases" e semeada UMA vez, vazia, e so MUTADA depois (nunca
-        // reescrita via blackboard_set de novo). fsm::Blackboard::set<T>
-        // troca o objeto por um novo a cada chamada -- se o subscriber de
-        // visao (em Fase2ItjbxNode::basesCallback) chamasse set() de novo a
-        // cada mensagem, qualquer ponteiro que um estado tivesse guardado em
-        // on_enter() (o padrao usado em RetangularSearchState) ficaria
-        // apontando para memoria liberada. Por isso o callback pega o
-        // ponteiro com blackboard_get e atribui por cima.
-        this->blackboard_set<std::vector<Eigen::Vector3d>>("bases", std::vector<Eigen::Vector3d>{});
-
-        // O TakeoffState(true), abaixo, reancora o mundo em (0,0,0) na
-        // decolagem inicial -- entao "casa" e a propria origem.
-        this->blackboard_set<Eigen::Vector3d>("home_position", Eigen::Vector3d(0.0, 0.0, 0.0));
-
         // Parametros do ROS 2 (vindos do YAML) viram entradas da blackboard.
-        for (const auto &[key, value] : params) {
+        for (const auto& [key, value] : params) {
             if (std::holds_alternative<double>(value)) {
                 this->blackboard_set<float>(key, static_cast<float>(std::get<double>(value)));
             } else if (std::holds_alternative<std::string>(value)) {
@@ -70,496 +75,558 @@ public:
         }
 
         // ========================= ESTADOS =========================
-        this->add_state("ARMING",  std::make_unique<ArmingState>());
+        this->add_state("ARMING", std::make_unique<ArmingState>());
         this->add_state("TAKEOFF", std::make_unique<TakeoffState>());
-        this->add_state("RETANGULAR_SEARCH", std::make_unique<RetangularSearchState>());
-        this->add_state("RETURN_HOME", std::make_unique<ReturnHomeState>());
+        this->add_state("INITIAL_ARUCO_SEARCH", std::make_unique<InitialArucoSearchState>());
+        this->add_state("SEARCH_ARUCO", std::make_unique<SearchArucoState>());
+        this->add_state("GO_TO_ARUCO", std::make_unique<GoToArucoState>());
+        this->add_state("DESCEND_FOR_SHAPE", std::make_unique<DescendForShapeState>());
+        this->add_state("SEARCH_BASE", std::make_unique<SearchBaseState>());
+        this->add_state("GO_TO_BASE", std::make_unique<GoToBaseState>());
+        this->add_state("CONFIRM_NUMBER", std::make_unique<ConfirmNumberState>());
+        this->add_state("RETURN_TO_SEARCH", std::make_unique<ReturnToSearchState>());
         this->add_state("LANDING", std::make_unique<LandingState>());
-        // ACRESCENTE aqui os estados desta missao, ex.:
-        // this->add_state("SEARCH", std::make_unique<SearchState>());
 
         // ======================= TRANSICOES ========================
-        // Cada linha e: {outcome retornado pelo estado, proximo estado}.
         this->add_transitions("ARMING", {
             {"ARMED", "TAKEOFF"},
             {"ERROR", "ERROR"}
         });
 
         this->add_transitions("TAKEOFF", {
-            // ACRESCENTE: troque "LANDING" pelo primeiro estado da sua missao.
-            {"TAKEOFF COMPLETED", "RETANGULAR_SEARCH"},
+            {"TAKEOFF COMPLETED", "INITIAL_ARUCO_SEARCH"},
             {"ERROR", "ERROR"}
         });
 
-        this->add_transitions("RETANGULAR_SEARCH", {
-            {"FAAAHHH", "RETURN_HOME"},
-            {"SEARCH COMPLETED", "RETURN_HOME"},
+        this->add_transitions("INITIAL_ARUCO_SEARCH", {
+            {"ARUCO_FOUND", "GO_TO_ARUCO"},
+            {"MAX_ALTITUDE_REACHED", "SEARCH_ARUCO"},
             {"ERROR", "ERROR"}
         });
 
-        this->add_transitions("RETURN_HOME", {
-            {"AT HOME", "LANDING"},
+        this->add_transitions("SEARCH_ARUCO", {
+            {"ARUCO_FOUND", "GO_TO_ARUCO"},
             {"ERROR", "ERROR"}
         });
 
-        this->add_transitions("LANDING", {
-            {"LANDED", "FINISHED"},
+        this->add_transitions("GO_TO_ARUCO", {
+            {"ARUCO_LOST", "SEARCH_ARUCO"},
+            {"SHAPE_UNKNOWN", "DESCEND_FOR_SHAPE"},
+            // KNOWN_BASE ia direto pra GO_TO_BASE quando uma base do mesmo
+            // formato ja estava a vista no instante do alinhamento com o
+            // ArUco -- pulava a volta pro centro e podia perseguir uma base
+            // errada vista de relance no caminho, sem nunca ter comecado a
+            // varredura de verdade. Agora os dois casos passam por
+            // SEARCH_BASE, que centraliza em (0,0) e SO' reage a deteccoes
+            // depois de chegar la' (ver SearchBaseState::going_to_center_).
+            {"UNKNOWN_BASE", "SEARCH_BASE"},
+            {"KNOWN_BASE", "SEARCH_BASE"},
             {"ERROR", "ERROR"}
         });
 
-        this->set_initial_state("ARMING");
+        this->add_transitions("DESCEND_FOR_SHAPE", {
+            {"SHAPE_FOUND", "GO_TO_ARUCO"},
+            {"ARUCO_LOST", "SEARCH_ARUCO"},
+            {"ERROR", "ERROR"}
+        });
+
+        this->add_transitions("SEARCH_BASE", {
+            {"BASE_FOUND", "GO_TO_BASE"},
+            {"ERROR", "ERROR"}
+        });
+
+        this->add_transitions("GO_TO_BASE", {
+            {"ALIGNED", "CONFIRM_NUMBER"},
+            {"BASE_LOST", "SEARCH_BASE"},
+            {"ERROR", "ERROR"}
+        });
+
+        this->add_transitions("CONFIRM_NUMBER", {
+            {"NUMBER_CONFIRMED", "LANDING"},
+            {"NUMBER_WRONG", "RETURN_TO_SEARCH"},
+            {"ERROR", "ERROR"}
+        });
+
+        this->add_transitions("RETURN_TO_SEARCH", {
+            {"AT_START", "SEARCH_BASE"},
+            {"ERROR", "ERROR"}
+        });
+
+        this->set_initial_state("TAKEOFF");
     }
 };
 
 /**
  * @brief No ROS 2 que executa a FSM da missao fase2_itjbx.
  *
- * Declara os parametros (sobrescritos pelo YAML no launch), monta a FSM e a
- * executa a 20 Hz.
+ * Portado de sae2026/mission_1::Mission1Node. Assina o mesmo detector de
+ * visao (RDPformas, topico "bouncing_detection", msg custom_msgs/BouncingDetection)
+ * que a mission_1 usa -- ele ja publica ArUco + forma + bases numeradas no
+ * formato que este no espera.
  */
 class Fase2ItjbxNode : public rclcpp::Node {
 public:
-    explicit Fase2ItjbxNode(std::shared_ptr<Drone> drone)
+    Fase2ItjbxNode(std::shared_ptr<Drone> drone)
         : rclcpp::Node("fase2_itjbx_node"), drone_(drone) {
 
-        // Um timestamp so, para o CSV e a pasta de fotos desta missao
-        // compartilharem o mesmo nome -- calculado uma vez aqui (inicio da
-        // missao), nao a cada evento, para os arquivos ficarem
-        // reconhecivelmente do mesmo voo.
-        std::time_t agora = std::time(nullptr);
-        char stamp[32];
-        std::strftime(stamp, sizeof(stamp), "%Y%m%d_%H%M%S", std::localtime(&agora));
-        session_stamp_ = stamp;
-
         // Valores padrao. O launch sobrescreve com config/simulation.yaml ou
-        // config/flight.yaml -- por isso trocar de simulacao para voo e trocar
-        // de YAML, nao editar codigo.
+        // config/flight.yaml -- por isso trocar de simulacao para voo e
+        // trocar de YAML, nao editar codigo.
         std::map<std::string, std::variant<double, std::string>> default_params = {
-            // Decolagem (lidos pelo TakeoffState)
-            {"takeoff_height",          -2.5},   // metros, NED: negativo e para cima
-            {"max_vertical_velocity",    1.2},
-            {"position_tolerance",       0.15},
+            // Decolagem (NED: altura negativa e para cima)
+            {"takeoff_height",         -2.5},
+            {"max_vertical_velocity",  1.2},
+            {"position_tolerance",     0.15},
 
-            // Pouso (lidos pelo LandingState)
-            {"landing_velocity_max",     0.5},
-            {"landing_velocity_min",     0.15},
-            {"max_base_height",          0.5},
-            {"landing_timeout",          5.0},
+            // Pouso
+            {"landing_velocity_max",   0.5},
+            {"landing_velocity_min",   0.15},
+            {"max_base_height",        0.5},
+            {"landing_timeout",        5.0},
 
             // Movimento horizontal
-            {"max_horizontal_velocity",  1.5},
+            {"max_horizontal_velocity", 1.5},
 
-            // Retangular Search
-            {"abs_x", 6.0},
-            {"abs_y", 6.0},
-            {"diagonal_step", 1.5},
-            {"total_bases", 5.0}
-            // ACRESCENTE aqui os parametros desta missao, e replique-os nos
-            // dois YAML de config/.
+            // Busca do ArUco / identificacao da forma
+            {"z_max_search", -2.5},
+            {"search_aruco_velocity", 0.4},
+            {"aruco_persistence_frames", 3.0},
+            {"aruco_tolerance", 0.15},
+            {"aruco_kp_x", 0.6},
+            {"aruco_kp_y", 0.6},
+            {"aruco_kd_x", 0.05},
+            {"aruco_kd_y", 0.05},
+            {"aruco_align_frames", 5.0},
+            {"shape_id_altitude", -1.0},
+            {"shape_id_velocity", 0.3},
+
+            // Busca/aproximacao da base numerada alvo
+            {"base_tolerance", 0.10},
+            {"base_kp_x", 0.5},
+            {"base_kp_y", 0.5},
+            {"base_kd_x",  0.03},
+            {"base_kd_y",  0.03},
+            {"base_persistence_frames", 3.0},
+            {"base_cam_scale", 0.7},
+            {"base_max_err_radius", 0.7},
+            {"base_dedup_radius", 1.5},
+            {"aruco_exclusion_radius", 0.5},
+
+            // Confirmacao de numero sob demanda (CONFIRM_NUMBER) e bases
+            // ja descartadas (ver ConfirmNumberState/cv_callback).
+            {"ocr_timeout_ticks", 200.0},   // 10s @ 20Hz esperando resposta do OCR
+            {"ignored_base_radius", 1.0},   // raio (m) pra considerar "a mesma base ja rejeitada"
+
+            // Varredura retangular (RetangularSearchState, fase1_itjbx) --
+            // usada tanto por SEARCH_ARUCO quanto por SEARCH_BASE. A busca de
+            // ArUco cobre o campo inteiro a partir de casa; a de base e um
+            // padrao mais apertado, local, em torno de uma posicao em cache.
+            {"aruco_search_abs_x", 6.0},
+            {"aruco_search_abs_y", 6.0},
+            {"aruco_search_step", 1.0},
+            {"base_search_abs_x", 3.0},
+            {"base_search_abs_y", 3.0},
+            {"base_search_step", 0.5},
+            {"corner_decel_radius", 1.0},
+            {"corner_min_velocity", 0.3},
         };
 
         auto params = declareAndGetParameters(default_params);
 
         fsm_ = std::make_unique<Fase2ItjbxFSM>(drone_, params);
 
-        declareVisionParameters();
-        projector_ = std::make_unique<vision_geometry::GroundProjector>(buildCalibration());
-
         timer_ = this->create_wall_timer(
-            std::chrono::milliseconds(50),                 // 20 Hz
+            std::chrono::milliseconds(50),
             std::bind(&Fase2ItjbxNode::executeFSM, this));
 
-        // Trajetoria para o RViz2 (convertida de NED para ENU).
+        // Trajetoria para o RViz2 (NED -> ENU).
         path_pub_ = this->create_publisher<nav_msgs::msg::Path>("/drone_trajectory", 10);
         trajectory_.header.frame_id = "map";
 
-        // Marcadores das bases detectadas, para o RViz2 (ver rviz/trajectory.rviz).
+        // Publica sempre que uma base e vista pela primeira vez (vai pro rosbag).
+        discovered_bases_pub_ = this->create_publisher<std_msgs::msg::String>("/discovered_bases", 10);
+
+        // Marcadores das bases descobertas, para o RViz2.
         base_markers_pub_ = this->create_publisher<visualization_msgs::msg::MarkerArray>(
             "/fase2_itjbx/base_markers", 10);
+        base_markers_pub_->publish(visualization_msgs::msg::MarkerArray{});
 
-        // PLACEHOLDER copiado da fase1_itjbx: assina o MESMO detector da
-        // fase 1 (base_detector_itjbx2026) enquanto a fase 2 nao tem o seu
-        // proprio. So funciona de verdade se o que a fase 2 precisa
-        // detectar for o mesmo circulo branco da fase 1 -- o que
-        // provavelmente NAO e o caso, ja que a missao e mais complexa.
-        // Troque para um topico/no de visao proprio da fase 2 assim que
-        // souber o que ela precisa detectar (ver a conversa sobre
-        // base_detector_itjbx2026 para o padrao a seguir).
-        bases_sub_ = this->create_subscription<custom_msgs::msg::MultiBaseDetection>(
-            "/base_detector_itjbx2026/detections", 10,
-            std::bind(&Fase2ItjbxNode::basesCallback, this, std::placeholders::_1));
+        // Assinatura do no de visao. RDPformas (src/cv_nodes/RDPformas)
+        // publica BouncingDetection em "bouncing_detection" -- mesmo topico
+        // e mesma mensagem que a mission_1 do sae2026 consome.
+        cv_sub_ = this->create_subscription<custom_msgs::msg::BouncingDetection>(
+            "bouncing_detection", 10,
+            std::bind(&Fase2ItjbxNode::cv_callback, this, std::placeholders::_1)
+        );
+
+        // Leitura de digito SOB DEMANDA (ver ConfirmNumberState): pedido
+        // sai por aqui, resposta chega por ocr_result_sub_. RDPformas.py
+        // assina/publica esses dois mesmos topicos.
+        ocr_request_pub_ = this->create_publisher<std_msgs::msg::Empty>(
+            "/read_base_number_request", 10);
+        ocr_result_sub_ = this->create_subscription<custom_msgs::msg::ReadBaseNumberResult>(
+            "/read_base_number_result", 10,
+            std::bind(&Fase2ItjbxNode::ocr_result_callback, this, std::placeholders::_1)
+        );
 
         RCLCPP_INFO(this->get_logger(), "FSM da missao fase2_itjbx iniciada");
     }
 
 private:
-    /// Declara os parametros que so o Fase2ItjbxNode usa -- calibracao da
-    /// camera, projecao e deduplicacao de bases. Ficam separados do
-    /// default_params/declareAndGetParameters() do construtor de proposito:
-    /// aquele bloco alimenta a blackboard (o que os ESTADOS leem);
-    /// nenhum estado le camera_fx, base_plane_z etc, entao misturar os dois
-    /// so faria esta lista aparecer na blackboard sem que ninguem a use la.
-    /// Nomes de parametro de camera identicos aos da VisionFase1 do
-    /// cbr2026, para quem ja mexeu la nao ter que reaprender.
-    void declareVisionParameters() {
-        // ── Intrinsecos ────────────────────────────────────────────────
-        // fx=0.0 (padrao) deriva os intrinsecos do FOV; informe camera_fx
-        // para usar uma calibracao de verdade (camera_calibrator). Ver
-        // buildCalibration().
-        this->declare_parameter<double>("camera_fx", 0.0);
-        this->declare_parameter<double>("camera_fy", 0.0);
-        this->declare_parameter<double>("camera_cx", 0.0);
-        this->declare_parameter<double>("camera_cy", 0.0);
-        this->declare_parameter<double>("camera_hfov", 1.047);
-        this->declare_parameter<int>("camera_width", 640);
-        this->declare_parameter<int>("camera_height", 480);
-        this->declare_parameter<int>("published_size", 0);
-
-        // ── Extrinsecos ────────────────────────────────────────────────
-        // R_b_c = Rz(yaw)*Ry(pitch)*Rx(roll) leva vetores da camera para o
-        // corpo. yaw = pi/2 NAO e arbitrario: e a montagem em que o topo da
-        // imagem aponta para a frente do drone. Ver o README da
-        // vision_geometry -- extrinsecos nulos tambem dao uma camera
-        // olhando para baixo, mas girada 90 graus, e a diferenca e silenciosa.
-        this->declare_parameter<double>("camera_roll", 0.0);
-        this->declare_parameter<double>("camera_pitch", 0.0);
-        this->declare_parameter<double>("camera_yaw", M_PI / 2.0);
-        this->declare_parameter<double>("camera_tx", 0.0);
-        this->declare_parameter<double>("camera_ty", 0.0);
-        this->declare_parameter<double>("camera_tz", 0.0);
-
-        // ── Projecao e deduplicacao ───────────────────────────────────
-        // Altura do PLANO das bases, em mundo FRD (positivo = abaixo da
-        // origem). home_position e (0,0,0) e a origem e o chao na
-        // decolagem (TakeoffState(true) reancora ali) -- entao 0.0 e o
-        // ponto de partida certo se as bases estao no mesmo nivel do chao
-        // de decolagem. Ajuste se nao estiverem.
-        this->declare_parameter<double>("base_plane_z", 0.0);
-        base_plane_z_ = this->get_parameter("base_plane_z").as_double();
-
-        // Duas deteccoes a menos que isto (so no plano XY -- a componente Z
-        // carrega o erro de projecao) contam como a MESMA base fisica.
-        // Pequeno demais e a mesma base entra duas vezes por causa do
-        // ruido da deteccao; grande demais e junta bases vizinhas de
-        // verdade numa so. 0.75 (era 0.5): medido em teste, duas deteccoes
-        // da MESMA base projetaram a ~0.50 m uma da outra -- bem na borda
-        // do raio antigo. A media movel em basesCallback (ver o comentario
-        // la) tambem ajuda a estabilizar isso, mas so depois de algumas
-        // deteccoes; a margem extra cobre as primeiras.
-        this->declare_parameter<double>("base_dedup_radius", 0.75);
-        base_dedup_radius_ = this->get_parameter("base_dedup_radius").as_double();
-
-        // Fracao da imagem, de cada lado, tratada como "borda": deteccoes
-        // com centro normalizado fora de [margem, 1-margem] em X OU Y sao
-        // descartadas antes de projetar. Ver o comentario em basesCallback.
-        // 0.08 = 8% de cada lado; numa imagem de 800px isso e uns 64px.
-        this->declare_parameter<double>("border_margin_frac", 0.08);
-        border_margin_frac_ = this->get_parameter("border_margin_frac").as_double();
+    /// Resposta do pedido de leitura de digito sob demanda (ver
+    /// ConfirmNumberState) -- so' escreve na blackboard; quem interpreta o
+    /// resultado (compara com o numero esperado) e' o proprio estado.
+    void ocr_result_callback(const custom_msgs::msg::ReadBaseNumberResult::SharedPtr msg) {
+        fsm_->blackboard_set<bool>("ocr_result_ready", true);
+        fsm_->blackboard_set<bool>("ocr_result_success", msg->success);
+        fsm_->blackboard_set<std::string>("ocr_result_digit", msg->digit);
+        fsm_->blackboard_set<float>("ocr_result_confidence", msg->confidence);
+        RCLCPP_INFO(this->get_logger(), "[OCR] resultado: success=%d digit=%s conf=%.2f",
+            msg->success, msg->digit.c_str(), msg->confidence);
     }
 
-    /// Intrinsecos/extrinsecos da camera para o GroundProjector. Mesma
-    /// logica da VisionFase1::buildCalibration() do cbr2026: fx/fy/cx/cy
-    /// diretos se calibrados (camera_fx != 0), senao derivados do FOV.
-    vision_geometry::CameraCalibration buildCalibration() {
-        const double fx = this->get_parameter("camera_fx").as_double();
-        const int width = this->get_parameter("camera_width").as_int();
-        const int height = this->get_parameter("camera_height").as_int();
+    void cv_callback(const custom_msgs::msg::BouncingDetection::SharedPtr msg) {
+        // Info do ArUco
+        fsm_->blackboard_set<bool>("aruco_detected", msg->aruco_detected);
+        if (msg->aruco_detected) {
+            fsm_->blackboard_set<int>("aruco_id", msg->aruco_id);
+            fsm_->blackboard_set<std::string>("aruco_shape", msg->aruco_shape);
 
-        vision_geometry::CameraCalibration calib;
-
-        if (fx > 0.0) {
-            calib.fx = fx;
-            calib.fy = this->get_parameter("camera_fy").as_double();
-            calib.cx = this->get_parameter("camera_cx").as_double();
-            calib.cy = this->get_parameter("camera_cy").as_double();
-            calib.image_width = width;
-            calib.image_height = height;
-        } else {
-            int published = this->get_parameter("published_size").as_int();
-            if (published <= 0) published = std::min(width, height);
-
-            calib = vision_geometry::CameraCalibration::fromHorizontalFov(
-                this->get_parameter("camera_hfov").as_double(), width, height, published);
-            RCLCPP_INFO(this->get_logger(),
-                "camera_fx nao informado: intrinsecos derivados do FOV (fx=%.1f, %dx%d)",
-                calib.fx, calib.image_width, calib.image_height);
-        }
-
-        calib.roll = this->get_parameter("camera_roll").as_double();
-        calib.pitch = this->get_parameter("camera_pitch").as_double();
-        calib.yaw = this->get_parameter("camera_yaw").as_double();
-        calib.tx = this->get_parameter("camera_tx").as_double();
-        calib.ty = this->get_parameter("camera_ty").as_double();
-        calib.tz = this->get_parameter("camera_tz").as_double();
-        calib.bbox_is_normalized = true;  // base_detector_itjbx2026 so publica [0,1]
-
-        return calib;
-    }
-
-    /// Indice da base acumulada mais proxima da candidata, ou -1 se nenhuma
-    /// estiver a menos de base_dedup_radius_. Comparacao horizontal de
-    /// proposito -- a componente Z carrega o erro da projecao (ver
-    /// docstring do modulo em node.py).
-    int matchingBaseIndex(const Eigen::Vector3d &candidata,
-                           const std::vector<Eigen::Vector3d> &bases) const {
-        for (size_t i = 0; i < bases.size(); ++i) {
-            const double d = (candidata.head<2>() - bases[i].head<2>()).norm();
-            if (d < base_dedup_radius_) return static_cast<int>(i);
-        }
-        return -1;
-    }
-
-    void basesCallback(const custom_msgs::msg::MultiBaseDetection::SharedPtr msg) {
-        if (msg->bases.empty()) return;
-
-        // "bases" foi semeada uma vez (vazia) no construtor da FSM e nunca
-        // mais reescrita via blackboard_set -- so mutada por cima do mesmo
-        // ponteiro, para nao invalidar quem guardou esse ponteiro em
-        // on_enter() (RetangularSearchState). Ver o comentario la no
-        // construtor da FSM.
-        //
-        // E' ACUMULADA, nunca esvaziada aqui: cada mensagem so cobre o que a
-        // camera ve NESTE frame, e uma base sai de vista assim que o drone
-        // segue para o proximo trecho da varredura. Se este callback
-        // limpasse o vetor a cada mensagem, "bases" so refletiria a ultima
-        // base vista -- e RetangularSearchState, que compara bases_->size()
-        // contra total_bases_, nunca acumularia contagem nenhuma.
-        auto *bases_ptr = fsm_->blackboard_get<std::vector<Eigen::Vector3d>>("bases");
-        if (bases_ptr == nullptr) return;
-
-        // Mesma pose para todas as deteccoes desta mensagem: vieram do
-        // mesmo frame.
-        vision_geometry::DronePose pose;
-        pose.position = drone_->getLocalPosition();
-        pose.rpy = drone_->getOrientation();
-
-        bool mudou = false;
-        for (const auto &b : msg->bases) {
-            // Deteccao perto da BORDA do quadro: o angulo de visada e mais
-            // obliquo, e projectToPlane() erra proporcionalmente mais quanto
-            // mais obliquo o raio -- ao contrario do PnP (que tem
-            // touchesBorder() para isso), a projecao por plano nao tem
-            // nenhuma guarda embutida. Um drone mais lento piora isto: ele
-            // fica mais tempo se aproximando/afastando de cada base, entao
-            // ve ela de angulos obliquos por MAIS frames antes de sair do
-            // quadro -- e' assim que a mesma base passou a gerar posicoes
-            // espalhadas o bastante para escapar do dedup. Descartar a
-            // deteccao perto da borda ataca a causa (menos ruido entrando),
-            // em vez de so alargar base_dedup_radius_ (que so tolera mais
-            // ruido, e arrisca fundir bases diferentes se a arena tiver
-            // duas perto uma da outra).
-            if (b.position.x < border_margin_frac_ || b.position.x > 1.0 - border_margin_frac_ ||
-                b.position.y < border_margin_frac_ || b.position.y > 1.0 - border_margin_frac_) {
-                continue;
-            }
-
-            vision_geometry::BoundingBox bbox;
-            bbox.center_x = b.position.x;  // pixel normalizado [0,1], nao metros
-            bbox.center_y = b.position.y;
-
-            const Eigen::Vector3d posicao_mundo =
-                projector_->projectToPlane(pose, bbox, base_plane_z_);
-
-            // Distancia do centro da deteccao ao centro do QUADRO (nao do
-            // mundo) -- mesma metrica que VisionFase1::closestBox() do
-            // cbr2026 usa para escolher a melhor caixa. Quanto mais perto do
-            // centro, mais de frente a foto -- e' a "melhor" para guardar
-            // como retrato da base.
-            const double dist_centro_quadro = std::hypot(b.position.x - 0.5, b.position.y - 0.5);
-
-            const int idx = matchingBaseIndex(posicao_mundo, *bases_ptr);
-            if (idx < 0) {
-                bases_ptr->push_back(posicao_mundo);
-                base_hit_counts_.push_back(1);
-                base_best_center_dist_.push_back(dist_centro_quadro);
-                mudou = true;
-                drone_->log(
-                    "Base nova em {" + std::to_string(posicao_mundo.x()) + ", " +
-                    std::to_string(posicao_mundo.y()) + "} (" +
-                    std::to_string(bases_ptr->size()) + " ate agora)");
-                savePhoto(bases_ptr->size() - 1, msg->frame);
+            // Filtro EMA na posicao do ArUco: suaviza ruido de um frame so e
+            // evita o pico de derivada que aparece quando a deteccao
+            // "pisca" (perde e reaparece).
+            if (aruco_first_detection_) {
+                aruco_smoothed_x_ = msg->aruco_x_error;
+                aruco_smoothed_y_ = msg->aruco_y_error;
+                aruco_first_detection_ = false;
             } else {
-                // MEDIA MOVEL, nao descarte simples. A mesma base fisica,
-                // vista de angulos diferentes em frames diferentes, projeta
-                // em posicoes ligeiramente distintas -- e' assim que duas
-                // deteccoes da MESMA base acabam a poucos centimetros da
-                // borda de base_dedup_radius_ uma da outra, e uma acaba do
-                // lado de fora por pouco. Refinar a posicao acumulada a cada
-                // deteccao repetida (em vez de so aceitar a primeira e jogar
-                // fora o resto) converge para um centroide mais estavel, o
-                // que reduz esse "passeio" nas deteccoes seguintes da mesma
-                // base -- ao contrario de so aumentar o raio, que so
-                // aumenta a chance de fundir duas bases DIFERENTES que
-                // estejam perto.
-                base_hit_counts_[idx]++;
-                const double peso_novo = 1.0 / static_cast<double>(base_hit_counts_[idx]);
-                (*bases_ptr)[idx] += peso_novo * (posicao_mundo - (*bases_ptr)[idx]);
-                mudou = true;
+                constexpr float kAlpha = 0.45f;
+                aruco_smoothed_x_ = kAlpha * msg->aruco_x_error
+                                  + (1.0f - kAlpha) * aruco_smoothed_x_;
+                aruco_smoothed_y_ = kAlpha * msg->aruco_y_error
+                                  + (1.0f - kAlpha) * aruco_smoothed_y_;
+            }
+            fsm_->blackboard_set<float>("aruco_x_error", aruco_smoothed_x_);
+            fsm_->blackboard_set<float>("aruco_y_error", aruco_smoothed_y_);
+        } else {
+            aruco_first_detection_ = true;
+        }
+        if (msg->aruco_detected != prev_aruco_detected_) {
+            if (msg->aruco_detected)
+                RCLCPP_INFO(this->get_logger(), "[CV] ArUco DETECTADO id=%d shape=%s",
+                    msg->aruco_id, msg->aruco_shape.c_str());
+            else
+                RCLCPP_INFO(this->get_logger(), "[CV] ArUco PERDIDO");
+            prev_aruco_detected_ = msg->aruco_detected;
+        }
 
-                // So troca a foto se este enquadramento for MELHOR (mais
-                // perto do centro) que o guardado ate agora -- nao a cada
-                // deteccao repetida, que na maioria das vezes e' pior (o
-                // drone ja esta se afastando).
-                if (dist_centro_quadro < base_best_center_dist_[idx]) {
-                    base_best_center_dist_[idx] = dist_centro_quadro;
-                    savePhoto(idx, msg->frame);
+        // Info do alvo -- travado: uma vez identificado, nunca reseta sozinho
+        // (a forma + regra de divisibilidade sao deterministicas pro ArUco ID fixo).
+        if (msg->target_calculated) {
+            fsm_->blackboard_set<bool>("target_calculated", true);
+            fsm_->blackboard_set<std::string>("target_base", msg->target_base);
+        }
+        if (msg->target_calculated && !prev_target_calculated_) {
+            RCLCPP_INFO(this->get_logger(), "[CV] Alvo identificado: %s",
+                msg->target_base.c_str());
+            prev_target_calculated_ = true;
+        }
+
+        // Bases visiveis
+        fsm_->blackboard_set<bool>("target_base_in_sight", msg->target_base_in_sight);
+        if (msg->target_base_in_sight) {
+            fsm_->blackboard_set<float>("target_base_x_error", msg->target_base_x_error);
+            fsm_->blackboard_set<float>("target_base_y_error", msg->target_base_y_error);
+        }
+        if (msg->target_base_in_sight != prev_target_base_in_sight_) {
+            if (msg->target_base_in_sight)
+                RCLCPP_INFO(this->get_logger(), "[CV] Base alvo A VISTA (err=%.2f,%.2f)",
+                    msg->target_base_x_error, msg->target_base_y_error);
+            else
+                RCLCPP_INFO(this->get_logger(), "[CV] Base alvo PERDIDA");
+            prev_target_base_in_sight_ = msg->target_base_in_sight;
+        }
+
+        // Cache de posicao das bases, com deduplicacao espacial e pontuacao
+        // de confianca -- identico a sae2026/mission_1::cv_callback.
+        {
+            float* cam_scale_ptr = fsm_->blackboard_get<float>("base_cam_scale");
+            float cam_scale = cam_scale_ptr ? *cam_scale_ptr : 0.7f;
+            float alt = -static_cast<float>(drone_->getLocalPosition().z());
+            float yaw = static_cast<float>(drone_->getOrientation()[2]);
+            auto  dpos = drone_->getLocalPosition();
+
+            float* max_err_ptr = fsm_->blackboard_get<float>("base_max_err_radius");
+            float max_err_radius = max_err_ptr ? *max_err_ptr : 0.7f;
+
+            float* dedup_ptr = fsm_->blackboard_get<float>("base_dedup_radius");
+            float dedup_r = dedup_ptr ? *dedup_ptr : 1.5f;
+
+            // So trava a posicao mundial do ArUco depois que o alvo foi
+            // calculado (drone alinhado, erro ~0 -> estimativa boa). Durante
+            // a varredura distante o erro de projecao e grande demais.
+            if (msg->aruco_detected && !aruco_world_valid_) {
+                bool* tc_ptr = fsm_->blackboard_get<bool>("target_calculated");
+                if (tc_ptr && *tc_ptr) {
+                    float ldx_a = -msg->aruco_y_error * alt * cam_scale;
+                    float ldy_a =  msg->aruco_x_error * alt * cam_scale;
+                    aruco_world_x_ = static_cast<float>(dpos.x())
+                                     + ldx_a * std::cos(yaw) - ldy_a * std::sin(yaw);
+                    aruco_world_y_ = static_cast<float>(dpos.y())
+                                     + ldx_a * std::sin(yaw) + ldy_a * std::cos(yaw);
+                    aruco_world_valid_ = true;
+                    RCLCPP_INFO(this->get_logger(),
+                        "[ARUCO_POS] Posicao mundial travada @ (%.2f, %.2f)",
+                        aruco_world_x_, aruco_world_y_);
                 }
             }
-        }
 
-        // So republica quando o conjunto muda -- os marcadores tem duracao
-        // infinita no RViz2 (lifetime 0), entao nao precisam ser reenviados
-        // a cada frame para continuar aparecendo.
-        if (mudou) publishBaseMarkers(*bases_ptr);
-    }
+            float* excl_ptr = fsm_->blackboard_get<float>("aruco_exclusion_radius");
+            float aruco_excl_r = excl_ptr ? *excl_ptr : 0.5f;
 
-    /// Grava msg.frame (JPEG cru) como o retrato da base `idx`, em
-    /// ~/evtol/mission_logs/fase2_itjbx_bases_<session_stamp_>/base_<idx>.jpg.
-    /// Sobrescreve sem aviso -- e' assim que uma foto melhor substitui a
-    /// anterior (ver o comentario em basesCallback).
-    void savePhoto(size_t idx, const sensor_msgs::msg::CompressedImage &frame) {
-        if (frame.data.empty()) return;  // no_detections nao embute frame (ver node.py)
+            // Suprime bases ja' REJEITADAS por CONFIRM_NUMBER (numero lido
+            // nao batia com o alvo) -- calcula a posicao no mundo do
+            // candidato ATUAL e verifica se cai perto de alguma base
+            // registrada em "ignored_base_*" (ver
+            // ConfirmNumberState::registrar_base_ignorada). Se cair, este
+            // tick nao conta como "base alvo a vista" pra' SEARCH_BASE/
+            // GO_TO_BASE nao voltarem a perseguir a mesma base rejeitada.
+            if (msg->target_base_in_sight) {
+                float ldx_t = -msg->target_base_y_error * alt * cam_scale;
+                float ldy_t =  msg->target_base_x_error * alt * cam_scale;
+                float twx = static_cast<float>(dpos.x())
+                            + ldx_t * std::cos(yaw) - ldy_t * std::sin(yaw);
+                float twy = static_cast<float>(dpos.y())
+                            + ldx_t * std::sin(yaw) + ldy_t * std::cos(yaw);
 
-        const std::string dir = photosDir();
-        std::error_code ec;
-        std::filesystem::create_directories(dir, ec);
-        if (ec) {
-            RCLCPP_ERROR(this->get_logger(), "Nao consegui criar '%s': %s",
-                         dir.c_str(), ec.message().c_str());
-            return;
-        }
+                int* ignored_count_ptr = fsm_->blackboard_get<int>("ignored_base_count");
+                int ignored_count = ignored_count_ptr ? *ignored_count_ptr : 0;
+                float* ignore_r_ptr = fsm_->blackboard_get<float>("ignored_base_radius");
+                float ignore_r = ignore_r_ptr ? *ignore_r_ptr : 1.0f;
 
-        const std::string ext = frame.format.find("png") != std::string::npos ? ".png" : ".jpg";
-        const std::string path = dir + "/base_" + std::to_string(idx) + ext;
-
-        std::ofstream out(path, std::ios::binary);
-        if (!out.is_open()) {
-            RCLCPP_ERROR(this->get_logger(), "Nao consegui abrir '%s' para gravar a foto",
-                         path.c_str());
-            return;
-        }
-        out.write(reinterpret_cast<const char *>(frame.data.data()),
-                  static_cast<std::streamsize>(frame.data.size()));
-    }
-
-    std::string photosDir() const {
-        return std::string(std::getenv("HOME") ? std::getenv("HOME") : "/tmp") +
-               "/evtol/mission_logs/fase2_itjbx_bases_" + session_stamp_;
-    }
-
-    /// Uma esfera + um texto com o indice para cada base acumulada, em
-    /// /fase2_itjbx/base_markers. Mesma conversao NED->ENU do /drone_trajectory
-    /// (ver executeFSM) -- os dois tem que concordar no RViz2.
-    void publishBaseMarkers(const std::vector<Eigen::Vector3d> &bases) {
-        visualization_msgs::msg::MarkerArray array;
-
-        for (size_t i = 0; i < bases.size(); ++i) {
-            const auto &p = bases[i];
-            const auto stamp = this->now();
-
-            visualization_msgs::msg::Marker sphere;
-            sphere.header.frame_id = "map";
-            sphere.header.stamp = stamp;
-            sphere.ns = "bases";
-            sphere.id = static_cast<int>(i);
-            sphere.type = visualization_msgs::msg::Marker::SPHERE;
-            sphere.action = visualization_msgs::msg::Marker::ADD;
-            sphere.pose.position.x = p.y();    // East  = NED y
-            sphere.pose.position.y = p.x();    // North = NED x
-            sphere.pose.position.z = -p.z();   // Up    = -NED z
-            sphere.pose.orientation.w = 1.0;
-            sphere.scale.x = sphere.scale.y = sphere.scale.z = 0.4;
-            sphere.color.r = 1.0f;
-            sphere.color.g = 0.55f;
-            sphere.color.b = 0.0f;
-            sphere.color.a = 1.0f;
-            sphere.lifetime = rclcpp::Duration(0, 0);  // 0 = nunca expira
-            array.markers.push_back(sphere);
-
-            visualization_msgs::msg::Marker label;
-            label.header = sphere.header;
-            label.ns = "bases_id";
-            label.id = static_cast<int>(i);
-            label.type = visualization_msgs::msg::Marker::TEXT_VIEW_FACING;
-            label.action = visualization_msgs::msg::Marker::ADD;
-            label.pose.position.x = sphere.pose.position.x;
-            label.pose.position.y = sphere.pose.position.y;
-            label.pose.position.z = sphere.pose.position.z + 0.5;
-            label.pose.orientation.w = 1.0;
-            label.scale.z = 0.35;
-            label.color.r = label.color.g = label.color.b = label.color.a = 1.0f;
-            label.text = std::to_string(i);
-            label.lifetime = sphere.lifetime;
-            array.markers.push_back(label);
-        }
-
-        base_markers_pub_->publish(array);
-    }
-
-    /// Grava as bases acumuladas num CSV em ~/evtol/mission_logs/. Chamado
-    /// uma unica vez, quando a FSM termina (ver executeFSM). Usa
-    /// session_stamp_ (calculado uma vez no construtor, inicio da missao) --
-    /// o mesmo nome da pasta de fotos que savePhoto() ja vem preenchendo,
-    /// entao CSV e fotos de uma mesma missao ficam visivelmente juntos.
-    void writeBasesReport() {
-        auto *bases_ptr = fsm_->blackboard_get<std::vector<Eigen::Vector3d>>("bases");
-
-        const std::string dir =
-            std::string(std::getenv("HOME") ? std::getenv("HOME") : "/tmp") +
-            "/evtol/mission_logs";
-        std::error_code ec;
-        std::filesystem::create_directories(dir, ec);
-
-        const std::string path = dir + "/fase2_itjbx_bases_" + session_stamp_ + ".csv";
-
-        std::ofstream out(path);
-        if (!out.is_open()) {
-            RCLCPP_ERROR(this->get_logger(), "Nao consegui abrir '%s' para escrever as bases",
-                         path.c_str());
-            return;
-        }
-
-        const size_t total = bases_ptr != nullptr ? bases_ptr->size() : 0;
-        out << "# fase2_itjbx -- bases detectadas (FRD, metros)\n";
-        out << "# encontradas: " << total << "\n";
-        out << "# fotos em: " << photosDir() << "/base_<id>.jpg\n";
-        out << "id,x,y,z\n";
-        if (bases_ptr != nullptr) {
-            for (size_t i = 0; i < bases_ptr->size(); ++i) {
-                const auto &p = (*bases_ptr)[i];
-                out << i << "," << p.x() << "," << p.y() << "," << p.z() << "\n";
+                for (int i = 0; i < ignored_count; ++i) {
+                    float* ix = fsm_->blackboard_get<float>("ignored_base_" + std::to_string(i) + "_x");
+                    float* iy = fsm_->blackboard_get<float>("ignored_base_" + std::to_string(i) + "_y");
+                    if (!ix || !iy) continue;
+                    if (std::hypot(twx - *ix, twy - *iy) < ignore_r) {
+                        fsm_->blackboard_set<bool>("target_base_in_sight", false);
+                        break;
+                    }
+                }
             }
-        }
-        out.close();
 
-        RCLCPP_INFO(this->get_logger(), "Bases detectadas (%zu) gravadas em %s",
-                    total, path.c_str());
+            auto store_base_pos = [&](const std::string& label, float ex, float ey, float det_conf) {
+                if (label.empty()) return;
+                if (std::hypot(ex, ey) > max_err_radius) return;
+
+                float ldx = -ey * alt * cam_scale;
+                float ldy =  ex * alt * cam_scale;
+                float wx  = static_cast<float>(dpos.x())
+                            + ldx * std::cos(yaw) - ldy * std::sin(yaw);
+                float wy  = static_cast<float>(dpos.y())
+                            + ldx * std::sin(yaw) + ldy * std::cos(yaw);
+                float r   = std::max(0.5f, std::hypot(ex, ey) * alt * cam_scale + 0.5f);
+
+                if (std::hypot(wx, wy) < 0.30f) {
+                    RCLCPP_DEBUG(this->get_logger(),
+                        "[IGNORE_LAUNCHPAD] %s @ (%.2f, %.2f) -- perto demais da origem",
+                        label.c_str(), wx, wy);
+                    return;
+                }
+
+                if (aruco_world_valid_) {
+                    float d = std::hypot(wx - aruco_world_x_, wy - aruco_world_y_);
+                    if (d < aruco_excl_r) {
+                        RCLCPP_DEBUG(this->get_logger(),
+                            "[IGNORE_ARUCO] %s @ (%.2f, %.2f) -- %.2f m do ArUco (excl=%.2f)",
+                            label.c_str(), wx, wy, d, aruco_excl_r);
+                        return;
+                    }
+                }
+
+                float pos_q = 1.0f - std::min(1.0f, std::hypot(ex, ey));
+                float conf  = det_conf * pos_q;
+
+                std::string closest_label;
+                float closest_dist = dedup_r + 1.0f;
+                std::string weakest_nearby_label;
+                float weakest_conf = 1.1f;
+                int nearby_count = 0;
+
+                for (const auto& lbl : known_base_labels_) {
+                    float* kx = fsm_->blackboard_get<float>("known_base_" + lbl + "_x");
+                    float* ky = fsm_->blackboard_get<float>("known_base_" + lbl + "_y");
+                    if (!kx || !ky) continue;
+                    float dist = std::hypot(wx - *kx, wy - *ky);
+                    if (dist < dedup_r) {
+                        nearby_count++;
+                        if (dist < closest_dist) {
+                            closest_dist = dist;
+                            closest_label = lbl;
+                        }
+                        float* kc = fsm_->blackboard_get<float>("known_base_" + lbl + "_conf");
+                        float known_c = kc ? *kc : 0.0f;
+                        if (known_c < weakest_conf) {
+                            weakest_conf = known_c;
+                            weakest_nearby_label = lbl;
+                        }
+                    }
+                }
+
+                auto write_entry = [&](const std::string& key_label) {
+                    fsm_->blackboard_set<float>("known_base_" + key_label + "_x", wx);
+                    fsm_->blackboard_set<float>("known_base_" + key_label + "_y", wy);
+                    fsm_->blackboard_set<float>("known_base_" + key_label + "_r", r);
+                    fsm_->blackboard_set<float>("known_base_" + key_label + "_conf", conf);
+                    known_base_labels_.insert(key_label);
+                };
+
+                if (nearby_count == 0) {
+                    write_entry(label);
+                    std::string discovery = "[DISCOVERY] " + label +
+                        " @ (" + std::to_string(wx) + ", " + std::to_string(wy) +
+                        ") r=" + std::to_string(r) + " conf=" + std::to_string(conf);
+                    RCLCPP_INFO(this->get_logger(), "%s", discovery.c_str());
+                    std_msgs::msg::String pub_msg;
+                    pub_msg.data = discovery;
+                    discovered_bases_pub_->publish(pub_msg);
+
+                } else if (nearby_count == 1) {
+                    float* kc = fsm_->blackboard_get<float>("known_base_" + closest_label + "_conf");
+                    float known_c = kc ? *kc : 0.0f;
+
+                    if (label == closest_label) {
+                        if (conf > known_c) {
+                            write_entry(label);
+                            RCLCPP_INFO(this->get_logger(),
+                                "[UPDATE] %s conf %.2f→%.2f", label.c_str(), known_c, conf);
+                        }
+                    } else {
+                        if (conf > known_c) {
+                            write_entry(label);
+                            RCLCPP_INFO(this->get_logger(),
+                                "[NEW_CONF] %s (conf %.2f) perto de %s (conf %.2f) -- adicionada",
+                                label.c_str(), conf, closest_label.c_str(), known_c);
+                        }
+                    }
+
+                } else {
+                    if (conf > weakest_conf && label == weakest_nearby_label) {
+                        write_entry(label);
+                        RCLCPP_INFO(this->get_logger(),
+                            "[UPDATE_MULTI] %s conf %.2f→%.2f",
+                            label.c_str(), weakest_conf, conf);
+                    } else if (conf > weakest_conf && label != weakest_nearby_label) {
+                        write_entry(label);
+                        RCLCPP_INFO(this->get_logger(),
+                            "[NEW_CONF_MULTI] %s (conf %.2f) adicionada perto do cluster",
+                            label.c_str(), conf);
+                    }
+                }
+            };
+
+            size_t n = msg->visible_bases.size();
+            for (size_t i = 0; i < n; ++i) {
+                float det_conf = (i < msg->visible_bases_confidence.size())
+                    ? msg->visible_bases_confidence[i] : 0.3f;
+                store_base_pos(msg->visible_bases[i],
+                               msg->visible_bases_x_error[i],
+                               msg->visible_bases_y_error[i],
+                               det_conf);
+            }
+            if (msg->target_base_in_sight)
+                store_base_pos(msg->target_base,
+                               msg->target_base_x_error,
+                               msg->target_base_y_error,
+                               0.7f);  // o alvo e sempre confiante (match exato)
+        }
     }
 
     void executeFSM() {
+        // ConfirmNumberState nao publica ROS diretamente (estados so' tem
+        // Drone/blackboard) -- so' seta esse flag em on_enter(); quem
+        // publica de fato o pedido de leitura de digito e' o No.
+        bool* ocr_pending_ptr = fsm_->blackboard_get<bool>("ocr_request_pending");
+        if (ocr_pending_ptr && *ocr_pending_ptr) {
+            ocr_request_pub_->publish(std_msgs::msg::Empty());
+            fsm_->blackboard_set<bool>("ocr_request_pending", false);
+            RCLCPP_INFO(this->get_logger(), "[OCR] pedido de leitura de numero disparado");
+        }
+
         auto pos    = drone_->getLocalPosition();
         auto orient = drone_->getOrientation();
 
-        // NED -> ENU para visualizar no RViz2.
         geometry_msgs::msg::PoseStamped ps;
-        ps.header.stamp       = this->now();
-        ps.header.frame_id    = "map";
-        ps.pose.position.x    =  static_cast<float>(pos.y());   // East  = NED y
-        ps.pose.position.y    =  static_cast<float>(pos.x());   // North = NED x
-        ps.pose.position.z    = -static_cast<float>(pos.z());   // Up    = -NED z
+        ps.header.stamp      = this->now();
+        ps.header.frame_id   = "map";
+        ps.pose.position.x   =  static_cast<float>(pos.y());   // East  = NED y
+        ps.pose.position.y   =  static_cast<float>(pos.x());   // North = NED x
+        ps.pose.position.z   = -static_cast<float>(pos.z());   // Up    = -NED z
         ps.pose.orientation.w = 1.0;
         trajectory_.header.stamp = ps.header.stamp;
         trajectory_.poses.push_back(ps);
         path_pub_->publish(trajectory_);
 
-        // Log de estado e posicao a cada 2 s (40 ticks a 20 Hz).
-        if (log_counter_++ % 40 == 0) {
-            RCLCPP_INFO(this->get_logger(), "[%s] pos=(%.2f, %.2f, %.2f) yaw=%.2f rad",
-                        fsm_->get_current_state().c_str(),
-                        static_cast<float>(pos.x()),
-                        static_cast<float>(pos.y()),
-                        static_cast<float>(pos.z()),
-                        static_cast<float>(orient[2]));
+        // Marcadores das bases no RViz2 -- republica a cada 2s (array vazio
+        // se nenhuma base foi vista ainda).
+        if (pos_log_counter_ % 40 == 0) {
+            visualization_msgs::msg::MarkerArray ma;
+            std::string* target_label = fsm_->blackboard_get<std::string>("target_base");
+            int mid = 0;
+            for (const auto& lbl : known_base_labels_) {
+                float* kx = fsm_->blackboard_get<float>("known_base_" + lbl + "_x");
+                float* ky = fsm_->blackboard_get<float>("known_base_" + lbl + "_y");
+                float* kc = fsm_->blackboard_get<float>("known_base_" + lbl + "_conf");
+                if (!kx || !ky) continue;
+                bool is_target = target_label && (*target_label == lbl);
+
+                float cr = 0.5f, cg = 0.5f, cb = 1.0f;  // azul (padrao)
+                if (lbl.find("TRIANGULO") != std::string::npos) { cr=1.0f; cg=0.2f; cb=0.2f; }
+                else if (lbl.find("ESTRELA")   != std::string::npos) { cr=1.0f; cg=0.9f; cb=0.0f; }
+                if (is_target) { cr=0.0f; cg=1.0f; cb=0.3f; }  // alvo = verde
+
+                visualization_msgs::msg::Marker sphere;
+                sphere.header.frame_id = "map";
+                sphere.header.stamp    = this->now();
+                sphere.ns = "base_spheres";
+                sphere.id = mid++;
+                sphere.type   = visualization_msgs::msg::Marker::SPHERE;
+                sphere.action = visualization_msgs::msg::Marker::ADD;
+                sphere.pose.position.x = *ky;   // ENU East  = NED y
+                sphere.pose.position.y = *kx;   // ENU North = NED x
+                sphere.pose.position.z = 0.05f;
+                sphere.pose.orientation.w = 1.0;
+                sphere.scale.x = sphere.scale.y = sphere.scale.z = is_target ? 0.4f : 0.25f;
+                sphere.color.r = cr; sphere.color.g = cg; sphere.color.b = cb;
+                sphere.color.a = kc ? (0.4f + *kc * 0.6f) : 0.7f;
+                sphere.lifetime = rclcpp::Duration(0, 0);
+                ma.markers.push_back(sphere);
+
+                visualization_msgs::msg::Marker txt;
+                txt.header = sphere.header;
+                txt.ns = "base_labels";
+                txt.id = mid++;
+                txt.type   = visualization_msgs::msg::Marker::TEXT_VIEW_FACING;
+                txt.action = visualization_msgs::msg::Marker::ADD;
+                txt.pose.position.x = sphere.pose.position.x;
+                txt.pose.position.y = sphere.pose.position.y;
+                txt.pose.position.z = 0.40f;
+                txt.pose.orientation.w = 1.0;
+                txt.scale.z = 0.20f;
+                txt.color.r = 1.0f; txt.color.g = 1.0f; txt.color.b = 1.0f; txt.color.a = 1.0f;
+                txt.text = lbl + (kc ? (" c=" + std::to_string(*kc).substr(0,4)) : "");
+                txt.lifetime = rclcpp::Duration(0, 0);
+                ma.markers.push_back(txt);
+            }
+            base_markers_pub_->publish(ma);
+        }
+
+        // Log de estado e posicao a cada 2s (40 ticks a 20 Hz).
+        if (pos_log_counter_++ % 40 == 0) {
+            RCLCPP_INFO(this->get_logger(), "[%s] pos=(%.2f,%.2f,%.2f) yaw=%.2f rad",
+                fsm_->get_current_state().c_str(),
+                static_cast<float>(pos.x()), static_cast<float>(pos.y()),
+                static_cast<float>(pos.z()), static_cast<float>(orient[2]));
         }
 
         if (rclcpp::ok() && !fsm_->is_finished()) {
@@ -567,20 +634,17 @@ private:
         } else {
             RCLCPP_INFO(this->get_logger(), "FSM terminou com: %s",
                         fsm_->get_fsm_outcome().c_str());
-            if (!report_written_) {
-                writeBasesReport();
-                report_written_ = true;
-            }
             rclcpp::shutdown();
         }
     }
 
     /// Declara cada parametro com seu padrao e le o valor efetivo.
     std::map<std::string, std::variant<double, std::string>> declareAndGetParameters(
-        const std::map<std::string, std::variant<double, std::string>> &defaults) {
+        const std::map<std::string, std::variant<double, std::string>>& defaults) {
 
         std::map<std::string, std::variant<double, std::string>> result;
-        for (const auto &[name, default_value] : defaults) {
+
+        for (const auto& [name, default_value] : defaults) {
             if (std::holds_alternative<double>(default_value)) {
                 this->declare_parameter(name, std::get<double>(default_value));
                 result[name] = this->get_parameter(name).as_double();
@@ -589,45 +653,43 @@ private:
                 result[name] = this->get_parameter(name).as_string();
             }
         }
+
         return result;
     }
 
     std::shared_ptr<Drone> drone_;
     std::unique_ptr<Fase2ItjbxFSM> fsm_;
     rclcpp::TimerBase::SharedPtr timer_;
+    rclcpp::Subscription<custom_msgs::msg::BouncingDetection>::SharedPtr cv_sub_;
+    rclcpp::Publisher<std_msgs::msg::Empty>::SharedPtr ocr_request_pub_;
+    rclcpp::Subscription<custom_msgs::msg::ReadBaseNumberResult>::SharedPtr ocr_result_sub_;
+
+    bool  prev_aruco_detected_       = false;
+    bool  prev_target_base_in_sight_ = false;
+    bool  prev_target_calculated_    = false;
+    float aruco_smoothed_x_          = 0.0f;
+    float aruco_smoothed_y_          = 0.0f;
+    bool  aruco_first_detection_     = true;
+    float aruco_world_x_             = 0.0f;
+    float aruco_world_y_             = 0.0f;
+    bool  aruco_world_valid_         = false;
+    int   pos_log_counter_           = 0;
+
     rclcpp::Publisher<nav_msgs::msg::Path>::SharedPtr path_pub_;
+    rclcpp::Publisher<std_msgs::msg::String>::SharedPtr discovered_bases_pub_;
     rclcpp::Publisher<visualization_msgs::msg::MarkerArray>::SharedPtr base_markers_pub_;
-    rclcpp::Subscription<custom_msgs::msg::MultiBaseDetection>::SharedPtr bases_sub_;
-    std::unique_ptr<vision_geometry::GroundProjector> projector_;
-    double base_plane_z_ = 0.0;
-    double base_dedup_radius_ = 0.75;
-    double border_margin_frac_ = 0.08;
-    // Paralelo a bases_ptr (mesmo indice, mesmo tamanho) para a media movel
-    // em basesCallback -- fica so aqui, nao na blackboard, porque nenhum
-    // estado precisa saber quantas vezes uma base foi vista.
-    std::vector<int> base_hit_counts_;
-    // Tambem paralelo a bases_ptr: a menor distancia ao centro do quadro ja
-    // vista para cada base, para savePhoto() so trocar a foto quando um
-    // enquadramento melhor aparecer.
-    std::vector<double> base_best_center_dist_;
-    std::string session_stamp_;
     nav_msgs::msg::Path trajectory_;
-    int log_counter_ = 0;
-    bool report_written_ = false;
+    std::set<std::string> known_base_labels_;
 };
 
 int main(int argc, const char *argv[]) {
     rclcpp::init(argc, argv);
 
-    // O Drone JA sobe o proprio executor e a propria thread de spin no
-    // construtor (veja drone_lib/src/Drone.cpp). Adiciona-lo a um executor
-    // aqui lanca em tempo de execucao:
-    //
-    //     terminate called after throwing an instance of 'std::runtime_error'
-    //       what():  Node '/Drone' has already been added to an executor.
-    //
-    // Por isso so o no da missao entra no executor deste main.
-    auto drone        = std::make_shared<Drone>();
+    // O Drone ja sobe o proprio executor e a propria thread de spin
+    // (drone_lib/src/Drone.cpp) -- adiciona-lo a um executor aqui lanca em
+    // tempo de execucao ("Node '/Drone' has already been added to an
+    // executor."). So o no da missao entra no executor deste main.
+    auto drone = std::make_shared<Drone>();
     auto mission_node = std::make_shared<Fase2ItjbxNode>(drone);
 
     rclcpp::executors::MultiThreadedExecutor executor;

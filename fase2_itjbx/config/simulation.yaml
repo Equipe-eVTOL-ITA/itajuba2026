@@ -2,67 +2,76 @@
 #
 # Estes valores sobrescrevem os padroes do codigo. Trocar de simulacao para
 # voo real deve ser trocar de arquivo aqui, nunca editar o .cpp.
+#
+# Portado de sae2026/mission_1 (ver fase2_itjbx.cpp): o no assina o mesmo
+# detector de visao (RDPformas, topico "bouncing_detection") e nao faz
+# projecao pixel->mundo propria -- por isso nao ha bloco de calibracao de
+# camera aqui, ao contrario de fase1_itjbx.
 fase2_itjbx_node:
   ros__parameters:
     # Decolagem (NED: altura negativa e para cima)
-    takeoff_height: -2.5
-    max_vertical_velocity: 1.2
-    position_tolerance: 0.15
+    takeoff_height: -2.0
+    max_vertical_velocity: 1.0
+    position_tolerance: 0.2
 
     # Pouso
     landing_velocity_max: 0.5
-    landing_velocity_min: 0.15
+    landing_velocity_min: 0.1
     max_base_height: 0.5
     landing_timeout: 5.0
 
     # Movimento horizontal
-    max_horizontal_velocity: 0.8
+    max_horizontal_velocity: 1.5
 
-    # Retangular Search
-    abs_x: 6.0
-    abs_y: 3.0
-    diagonal_step: 0.8
-    total_bases: 5.0
+    # Busca do ArUco / identificacao da forma
+    z_max_search: -2.0
+    search_aruco_velocity: 0.5
+    aruco_persistence_frames: 3.0
+    # Calibrado contra a geometria real: vertical_camera e' 800x800px @ 60deg
+    # HFOV (f ~= 693px) e as bases de sae_26 (base_hex*/star*/triangle*) sao
+    # discos de 0.8m de diametro (matriz de escala 0.4/0.4/0.001 no
+    # model.dae). DescendForShapeState trava X/Y no valor de quando entra no
+    # estado -- SEM realimentacao visual durante a descida -- entao um erro
+    # residual de alinhamento em METROS (fixo) vira um erro em PIXELS que
+    # CRESCE conforme a altura cai. Com aruco_tolerance=0.25 (antigo) a 2m
+    # de altura, erro max ~0.29m; descendo pra shape_id_altitude=-1.0 (antigo)
+    # esse mesmo erro dobra em pixels e o disco (554px de diametro a 1m, 69%
+    # do quadro) estourava a borda da imagem no pior caso -- contorno nao
+    # fecha, forma nao classifica, OCR nao le nada. Tolerancia mais apertada
+    # + descida mais rasa mantem o disco inteiro dentro do quadro com folga
+    # mesmo no pior caso (ver conversa que motivou este ajuste).
+    aruco_tolerance: 0.12
+    aruco_kp_x: 0.7
+    aruco_kp_y: 0.7
+    aruco_kd_x: 0.07
+    aruco_kd_y: 0.07
+    aruco_align_frames: 5.0
+    shape_id_altitude: -1.3
+    shape_id_velocity: 0.3
 
-    # ── Projecao pixel -> mundo (base_detector_itjbx2026) ────────────────
-    # camera_fx = 0.0 usa camera_hfov + camera_width/height para derivar os
-    # intrinsecos (o que o SDF do Gazebo da); informe camera_fx/fy/cx/cy so
-    # se tiver calibrado o fluxo publicado de verdade.
-    camera_fx: 0.0
-    camera_fy: 0.0
-    camera_cx: 0.0
-    camera_cy: 0.0
-    camera_hfov: 1.047
-    camera_width: 640
-    camera_height: 480
-    published_size: 0
+    # Busca/aproximacao da base numerada alvo
+    base_tolerance: 0.12
+    base_kp_x: 0.7
+    base_kp_y: 0.7
+    base_kd_x: 0.07
+    base_kd_y: 0.07
+    base_persistence_frames: 3.0
+    base_cam_scale: 0.7
+    base_max_err_radius: 0.7
+    base_dedup_radius: 1.5
+    aruco_exclusion_radius: 0.5
 
-    # Extrinsecos: pose da camera no corpo do drone (FRD). yaw = pi/2 e a
-    # montagem em que o topo da imagem aponta para a frente do drone.
-    camera_roll: 0.0
-    camera_pitch: 0.0
-    camera_yaw: 1.5707963267948966  # pi/2
-    camera_tx: 0.0
-    camera_ty: 0.0
-    camera_tz: 0.0
-
-    # Altura do plano das bases, em mundo FRD (positivo = abaixo da
-    # origem). 0.0 supoe que estao no mesmo nivel do chao de decolagem.
-    base_plane_z: 0.0
-
-    # Duas deteccoes a menos que isto (so XY) contam como a mesma base.
-    # 0.75: medido em teste, duas deteccoes da MESMA base projetaram a
-    # ~0.50 m uma da outra -- bem na borda do valor antigo (0.5).
-    base_dedup_radius: 0.75
-
-    # Fracao da imagem tratada como "borda" -- deteccoes com centro fora de
-    # [margem, 1-margem] em X ou Y sao descartadas antes de projetar. Voo
-    # mais lento deixa o drone mais tempo se aproximando/afastando de cada
-    # base, entao ve ela de angulo obliquo (perto da borda) por mais
-    # frames -- e projectToPlane erra mais quanto mais obliquo o angulo.
-    # Sem isso, reduzir max_horizontal_velocity piora a duplicacao de bases
-    # em vez de melhorar.
-    border_margin_frac: 0.08
+    # Varredura retangular (RetangularSearchState, fase1_itjbx) -- usada por
+    # SEARCH_ARUCO (campo inteiro, a partir de casa) e SEARCH_BASE (padrao
+    # apertado, local, em torno de uma posicao em cache).
+    aruco_search_abs_x: 6.0
+    aruco_search_abs_y: 6.0
+    aruco_search_step: 1.0
+    base_search_abs_x: 3.0
+    base_search_abs_y: 3.0
+    base_search_step: 0.5
+    corner_decel_radius: 1.0
+    corner_min_velocity: 0.3
 
 # O system_health do drone_lib tambem le deste arquivo.
 system_health:
